@@ -41,7 +41,11 @@
       net.status = "connected";
     } else if (msg.type === "snapshot") {
       net.latest = msg;
+      net.latestAt = performance.now();
       reconcile(msg);
+      // Попадания есть только в снапшоте своего тика — отдаём каждый снапшот,
+      // а не только последний к кадру, чтобы события не терялись.
+      if (net.onSnapshot) net.onSnapshot(msg, net.latestAt);
     }
   };
 
@@ -55,6 +59,8 @@
   };
 
   const input = { up: false, down: false, left: false, right: false, fire: false, angle: 0 };
+  // Нажатие огня запоминается до ближайшего тика: клик короче 50 мс иначе не дошёл бы до сервера.
+  let fireLatched = false;
   const mouse = { x: 0, y: 0, has: false };
   let seq = 0;
 
@@ -63,6 +69,7 @@
     if (!k) return;
     e.preventDefault();
     input[k] = true;
+    if (k === "fire") fireLatched = true;
   });
   window.addEventListener("keyup", (e) => {
     const k = KEYS[e.code];
@@ -84,7 +91,9 @@
       mouse.y = (e.clientY - r.top) * (h / r.height);
       mouse.has = true;
     });
-    canvas.addEventListener("mousedown", (e) => { if (e.button === 0) input.fire = true; });
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button === 0) { input.fire = true; fireLatched = true; }
+    });
     window.addEventListener("mouseup", (e) => { if (e.button === 0) input.fire = false; });
   };
 
@@ -161,9 +170,11 @@
       seq: ++seq,
       moveX: m.x, moveY: m.y,
       angle: input.angle,
-      // Булевы поля сервер сейчас игнорирует; оставлены для совместимости/отладки.
-      up: input.up, down: input.down, left: input.left, right: input.right, fire: input.fire,
+      fire: input.fire || fireLatched,
+      // Эти булевы поля сервер игнорирует; оставлены для совместимости/отладки.
+      up: input.up, down: input.down, left: input.left, right: input.right,
     };
+    fireLatched = false;
     ws.send(JSON.stringify(cmd));
     pending.push(cmd);
 
