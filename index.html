@@ -6,12 +6,12 @@
   <style>
     body { margin: 0; background: #111; color: #ccc; font: 14px sans-serif;
            display: flex; flex-direction: column; align-items: center; }
-    canvas { background: #1e1e24; margin-top: 16px; cursor: crosshair; }
+    canvas { background: #1e1e24; margin-top: 16px; cursor: none; } /* прицел рисуем сами */
   </style>
 </head>
 <body>
   <canvas id="game" width="800" height="600"></canvas>
-  <p>WASD / стрелки — движение, мышь — прицел, ЛКМ / пробел — огонь</p>
+  <p>WASD / стрелки — движение, мышь — прицел, ЛКМ / пробел — огонь, I — интерполяция вкл/выкл</p>
 
   <script src="net.js"></script>
   <script>
@@ -132,6 +132,146 @@
       }
     }
 
+    // ---- Интерполяция других игроков ----
+    const RENDER_DELAY = 100;  // мс: рисуем мир с этой задержкой
+    let interpOn = true;
+    let interpOk = false;      // нашлась ли пара снапшотов вокруг renderTime в этом кадре
+
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "KeyI" && !e.repeat) interpOn = !interpOn;
+    });
+
+    const lerp = (a, b, t) => a + (b - a) * t;
+    // Кратчайший путь по окружности: из 3.1 в -3.1 — это +0.08, а не -6.2.
+    function lerpAngle(a, b, t) {
+      let d = (b - a) % (2 * Math.PI);
+      if (d > Math.PI) d -= 2 * Math.PI;
+      if (d < -Math.PI) d += 2 * Math.PI;
+      return a + d * t;
+    }
+
+    // Игроки для отрисовки: список и hp/score — из последнего снапшота,
+    // x/y/angle — интерполированы между снапшотами вокруг now − RENDER_DELAY.
+    function renderPlayers(now, latest) {
+      interpOk = false;
+      if (!interpOn) return latest.players || [];
+      const pair = net.bracket(now - RENDER_DELAY);
+      if (!pair) return latest.players || []; // снапшотов не хватает — рисуем последний как есть
+      interpOk = true;
+
+      const [a, b] = pair;
+      const t = b.t > a.t ? (now - RENDER_DELAY - a.t) / (b.t - a.t) : 1;
+      const from = new Map((a.snap.players || []).map(p => [p.id, p]));
+      const to = new Map((b.snap.players || []).map(p => [p.id, p]));
+
+      return (latest.players || []).map(p => {
+        const pa = from.get(p.id), pb = to.get(p.id);
+        if (pa && pb) {
+          return { ...p, x: lerp(pa.x, pb.x, t), y: lerp(pa.y, pb.y, t), angle: lerpAngle(pa.angle, pb.angle, t) };
+        }
+        if (pb) return { ...p, x: pb.x, y: pb.y, angle: pb.angle }; // только что появился
+        return p; // в момент renderTime ещё не было — показываем последнюю позицию
+      });
+    }
+
+    // ---- Препятствия ----
+    function drawObstacles(wel) {
+      ctx.fillStyle = "#55575f";
+      ctx.strokeStyle = "#6c6f78";
+      ctx.lineWidth = 2;
+      for (const o of wel.obstacles) {
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.strokeRect(o.x, o.y, o.w, o.h);
+      }
+    }
+
+    // ---- Прицел с разбросом ----
+    // Сервер отклоняет пулю равномерно в ±heat·MAX_SPREAD рад (protocol.go, поле heat).
+    // На расстоянии d до курсора это ±d·tan(heat·MAX_SPREAD) — таким и рисуем радиус круга.
+    const MAX_SPREAD = 0.25;
+    const CROSS_MIN_PX = 6;
+
+    function drawCrosshair(snap, wel, sx, sy) {
+      const m = net.mouse();
+      if (!m || !net.predictionReady()) return;
+      const me = (snap.players || []).find(p => p.id === wel.playerId);
+      const heat = me && typeof me.heat === "number" ? Math.min(Math.max(me.heat, 0), 1) : 0;
+      const from = net.renderPos();
+      const d = Math.hypot(m.x - from.x, m.y - from.y);
+      const rPx = Math.max(CROSS_MIN_PX, d * Math.tan(heat * MAX_SPREAD) * (sx + sy) / 2);
+
+      // Рисуем в экранных координатах: мир растянут неравномерно, и круг стал бы эллипсом.
+      const cx = m.x * sx, cy = m.y * sy;
+      const g = Math.round(255 - 140 * heat), b = Math.round(255 - 215 * heat);
+      ctx.strokeStyle = `rgb(255,${g},${b})`; // от белого к оранжево-красному по мере перегрева
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rPx, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath(); // центр — маленький крест
+      ctx.moveTo(cx - 4, cy); ctx.lineTo(cx + 4, cy);
+      ctx.moveTo(cx, cy - 4); ctx.lineTo(cx, cy + 4);
+      ctx.stroke();
+    }
+
+    // ---- Раунды ----
+    function fmtTime(sec) {
+      const s = Math.max(0, Math.ceil(sec));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }
+
+    function drawRoundTimer(round) {
+      ctx.font = "bold 18px monospace";
+      ctx.textAlign = "right";
+      ctx.fillStyle = round.timeLeft <= 10 ? "#ff6b6b" : "#e8e8e8";
+      ctx.fillText(fmtTime(round.timeLeft), canvas.width - 10, 22);
+    }
+
+    function drawIntermission(round, snap, wel) {
+      ctx.fillStyle = "rgba(10,10,14,0.72)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // scores приходят только в intermission; на всякий случай — запасной вариант из игроков.
+      const rows = (round.scores || (snap.players || []).map(p => ({ id: p.id, score: p.score })))
+        .slice().sort((a, b) => b.score - a.score || a.id - b.id);
+      const winner = round.winnerId || 0; // 0 — ничья / никто не набрал очков
+
+      const cx = canvas.width / 2;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 28px sans-serif";
+      ctx.fillText("Раунд окончен", cx, 110);
+      ctx.font = "18px sans-serif";
+      ctx.fillStyle = winner ? "#ffd54a" : "#bbb";
+      ctx.fillText(winner ? `Победитель: игрок ${winner}${winner === wel.playerId ? " (вы)" : ""}` : "Ничья", cx, 142);
+
+      const rowH = 30, w = 280, x0 = cx - w / 2;
+      let y = 180;
+      ctx.font = "14px monospace";
+      ctx.fillStyle = "#888";
+      ctx.textAlign = "left";  ctx.fillText("#  игрок", x0 + 12, y);
+      ctx.textAlign = "right"; ctx.fillText("счёт", x0 + w - 12, y);
+      y += 12;
+      rows.forEach((r, i) => {
+        const isWinner = r.id === winner, isMe = r.id === wel.playerId;
+        ctx.fillStyle = isWinner ? "rgba(255,213,74,0.25)" : i % 2 ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)";
+        ctx.fillRect(x0, y, w, rowH);
+        if (isWinner) { ctx.strokeStyle = "#ffd54a"; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y + 1, w - 2, rowH - 2); }
+        ctx.font = isWinner ? "bold 16px monospace" : "16px monospace";
+        ctx.fillStyle = isWinner ? "#ffd54a" : isMe ? "#7ddc81" : "#e8e8e8";
+        ctx.textAlign = "left";
+        ctx.fillText(`${i + 1}  ${r.id}${isMe ? " (вы)" : ""}${isWinner ? "  ★" : ""}`, x0 + 12, y + 21);
+        ctx.textAlign = "right";
+        ctx.fillText(String(r.score), x0 + w - 12, y + 21);
+        y += rowH;
+      });
+
+      ctx.textAlign = "center";
+      ctx.font = "16px sans-serif";
+      ctx.fillStyle = "#ccc";
+      ctx.fillText(`Следующий раунд через ${Math.max(0, Math.ceil(round.timeLeft))} с`, cx, y + 40);
+    }
+
     function draw(now) {
       net.update(now);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -143,13 +283,15 @@
       if (wel) R = wel.radius;
       if (wel) ctx.setTransform(canvas.width / wel.width, 0, 0, canvas.height / wel.height, 0, 0);
 
+      if (wel) drawObstacles(wel); // под пулями и игроками
+
       if (snap && wel) {
         drawBullets(now);
 
         // Игроки
-        for (let p of snap.players || []) {
+        for (let p of renderPlayers(now, snap)) {
           const mine = p.id === wel.playerId;
-          // Своего игрока рисуем по предсказанию, остальных — как пришли с сервера.
+          // Своего игрока рисуем по предсказанию (без задержки), остальных — интерполированными.
           if (mine && net.predictionReady()) {
             const rp = net.renderPos();
             p = { ...p, x: rp.x, y: rp.y, angle: net.myAngle() };
@@ -184,7 +326,20 @@
       ctx.fillStyle = "#aaa";
       ctx.font = "12px monospace";
       ctx.textAlign = "left";
-      ctx.fillText(`${net.status}${snap ? "  tick " + snap.tick : ""}  pending ${net.pendingCount()}`, 8, 16);
+      const interp = !interpOn ? "interp OFF" : interpOk ? `interp ON ${RENDER_DELAY}ms` : "interp ON (нет пары)";
+      ctx.fillText(`${net.status}${snap ? "  tick " + snap.tick : ""}  ${interp}  [I]  pending ${net.pendingCount()}`, 8, 16);
+
+      const round = snap && snap.round;
+      if (round && wel) {
+        if (round.phase === "play") {
+          drawRoundTimer(round);
+          drawCrosshair(snap, wel, canvas.width / wel.width, canvas.height / wel.height);
+        } else if (round.phase === "intermission") {
+          drawIntermission(round, snap, wel);
+        }
+      } else if (snap && wel) {
+        drawCrosshair(snap, wel, canvas.width / wel.width, canvas.height / wel.height); // старый сервер без раундов
+      }
 
       requestAnimationFrame(draw);
     }

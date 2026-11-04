@@ -36,17 +36,70 @@
         height: msg.height,
         speed: typeof msg.speed === "number" ? msg.speed : DEFAULT_SPEED,
         radius: typeof msg.radius === "number" ? msg.radius : DEFAULT_RADIUS,
+        obstacles: Array.isArray(msg.obstacles) ? msg.obstacles : [],
       };
       net.connected = true;
       net.status = "connected";
     } else if (msg.type === "snapshot") {
       net.latest = msg;
       net.latestAt = performance.now();
+      pushSnapshot(msg, net.latestAt);
       reconcile(msg);
       // Попадания есть только в снапшоте своего тика — отдаём каждый снапшот,
       // а не только последний к кадру, чтобы события не терялись.
       if (net.onSnapshot) net.onSnapshot(msg, net.latestAt);
     }
+  };
+
+  // ---- Буфер снапшотов для интерполяции ----
+  // Храним не два, а все снапшоты за последнюю секунду: при 20 Гц два последних
+  // получены за последние ~50–100 мс, и момент now − renderDelay оказался бы старше обоих.
+  const SNAPSHOT_KEEP_MS = 1000;
+  net.snapshots = []; // [{snap, t}] по возрастанию t
+
+  // Время снапшота считаем по tick, а не по моменту получения: пачка снапшотов,
+  // пришедшая после лага, иначе получила бы почти одинаковое t, и интерполяция
+  // проскочила бы пропущенный отрезок рывком.
+  //   t = clockOffset + tick * tickMs
+  // clockOffset привязывает серверные тики к локальным часам. Берём минимум
+  // (receivedAt − tick·tickMs): это самый быстрый из доставленных снапшотов, задержки
+  // его только увеличивают. Вверх offset ползёт медленно — чтобы подстроиться под
+  // дрейф часов и рост пинга, но не дёргаться от разового лага.
+  const OFFSET_RISE = 0.01; // доля разницы, на которую offset поднимается за снапшот
+  let clockOffset = null;
+  let lastTick = -1;
+
+  function pushSnapshot(snap, receivedAt) {
+    const tickMs = 1000 / net.welcome.tickRate;
+    if (snap.tick <= lastTick) {
+      // Тик не растёт — сервер перезапустился или комната новая: старая шкала неверна.
+      net.snapshots = [];
+      clockOffset = null;
+    }
+    lastTick = snap.tick;
+
+    const sample = receivedAt - snap.tick * tickMs;
+    if (clockOffset === null || sample < clockOffset) clockOffset = sample;
+    else clockOffset += (sample - clockOffset) * OFFSET_RISE;
+
+    net.snapshots.push({ snap, t: 0 });
+    // Пересчитываем всю шкалу с текущим offset (≤ ~20 записей), чтобы интервалы
+    // между снапшотами всегда были ровно (Δtick · tickMs).
+    for (const s of net.snapshots) s.t = clockOffset + s.snap.tick * tickMs;
+    const t = net.snapshots[net.snapshots.length - 1].t;
+    // Чистим по времени (не по количеству); последние два оставляем всегда.
+    while (net.snapshots.length > 2 && net.snapshots[0].t < t - SNAPSHOT_KEEP_MS) {
+      net.snapshots.shift();
+    }
+  }
+
+  // Два соседних снапшота a, b с a.t <= renderTime <= b.t, или null, если таких нет.
+  net.bracket = function (renderTime) {
+    const s = net.snapshots;
+    for (let i = s.length - 1; i > 0; i--) {
+      if (s[i - 1].t <= renderTime && renderTime <= s[i].t) return [s[i - 1], s[i]];
+    }
+    return null;
   };
 
   // ---- Ввод ----
@@ -108,13 +161,47 @@
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+  // Зеркало game.sweepAxis: ограничивает движение круга радиуса r по одной оси
+  // (from → to), чтобы он не вошёл в прямоугольник [lo, hi] × [oLo, oHi].
+  // Касание (расстояние ровно r) — не коллизия, чтобы можно было скользить вдоль стены.
+  const CONTACT_EPS = 1e-9;
+  function sweepAxis(from, to, other, lo, hi, oLo, oHi, r) {
+    let gap = 0;
+    if (other < oLo) gap = oLo - other;
+    else if (other > oHi) gap = other - oHi;
+    if (gap >= r) return to;
+    const reach = Math.sqrt(r * r - gap * gap);
+    if (to > from) {
+      const c = lo - reach;
+      if (from <= c + CONTACT_EPS && to > c) return c;
+    } else if (to < from) {
+      const c = hi + reach;
+      if (from >= c - CONTACT_EPS && to < c) return c;
+    }
+    return to;
+  }
+
+  // Зеркало game.World.move: края мира и препятствия, оси раздельно — сначала X,
+  // затем Y с уже новым X (упёршись в стену, игрок скользит вдоль неё).
   function step(pos, cmd, dt) {
     const w = net.welcome;
-    const rx = Math.min(w.radius, w.width / 2);
-    const ry = Math.min(w.radius, w.height / 2);
-    pos.x = clamp(pos.x + cmd.moveX * w.speed * dt, rx, w.width - rx);
-    pos.y = clamp(pos.y + cmd.moveY * w.speed * dt, ry, w.height - ry);
+    const r = w.radius;
+    const rx = Math.min(r, w.width / 2), ry = Math.min(r, w.height / 2);
+    const dx = cmd.moveX * w.speed * dt, dy = cmd.moveY * w.speed * dt;
+    if (dx !== 0) {
+      let x = clamp(pos.x + dx, rx, w.width - rx);
+      for (const o of w.obstacles) x = sweepAxis(pos.x, x, pos.y, o.x, o.x + o.w, o.y, o.y + o.h, r);
+      pos.x = x;
+    }
+    if (dy !== 0) {
+      let y = clamp(pos.y + dy, ry, w.height - ry);
+      for (const o of w.obstacles) y = sweepAxis(pos.y, y, pos.x, o.y, o.y + o.h, o.x, o.x + o.w, r);
+      pos.y = y;
+    }
   }
+
+  // В intermission сервер отбрасывает ввод целиком и lastSeq не растёт.
+  const frozen = () => net.latest && net.latest.round && net.latest.round.phase === "intermission";
 
   // ---- Prediction / reconciliation ----
   const pred = {
@@ -137,8 +224,9 @@
     if (!me) return;
     const dt = 1 / net.welcome.tickRate;
 
-    // Всё, что сервер уже применил, больше не нужно.
-    pending = pending.filter(c => c.seq > me.lastSeq);
+    // Всё, что сервер уже применил, больше не нужно. В intermission сервер
+    // ввод не применит никогда — переигрывать нечего, игрок стоит.
+    pending = snap.round && snap.round.phase === "intermission" ? [] : pending.filter(c => c.seq > me.lastSeq);
 
     // Переигрываем неподтверждённые команды поверх authoritative-позиции.
     const fixed = { x: me.x, y: me.y };
@@ -175,10 +263,11 @@
       up: input.up, down: input.down, left: input.left, right: input.right,
     };
     fireLatched = false;
-    ws.send(JSON.stringify(cmd));
-    pending.push(cmd);
+    ws.send(JSON.stringify(cmd)); // шлём и в intermission — это ещё и heartbeat
 
     pred.prev = { ...pred.pos };
+    if (frozen()) return;
+    pending.push(cmd);
     step(pred.pos, cmd, dt);
   }
 
@@ -217,5 +306,6 @@
 
   net.predictionReady = () => pred.ready;
   net.myAngle = () => input.angle;
+  net.mouse = () => (mouse.has ? { x: mouse.x, y: mouse.y } : null); // в координатах мира
   net.pendingCount = () => pending.length;
 })();
