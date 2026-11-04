@@ -114,10 +114,17 @@
   const input = { up: false, down: false, left: false, right: false, fire: false, angle: 0 };
   // Нажатие огня запоминается до ближайшего тика: клик короче 50 мс иначе не дошёл бы до сервера.
   let fireLatched = false;
+  let dashLatched = false;
   const mouse = { x: 0, y: 0, has: false };
   let seq = 0;
 
   window.addEventListener("keydown", (e) => {
+    // Shift — одноразовый запрос рывка: уходит в ближайшем Input, удерживать не нужно.
+    if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
+      e.preventDefault();
+      if (!e.repeat) dashLatched = true;
+      return;
+    }
     const k = KEYS[e.code];
     if (!k) return;
     e.preventDefault();
@@ -181,13 +188,36 @@
     return to;
   }
 
+  // Рывок и ускорение — зеркало game/dash.go и pickups.go. В welcome этих
+  // параметров нет, поэтому значения взяты из game.DefaultConfig(): при их
+  // изменении на сервере поменяйте и здесь (или отдавайте их в welcome).
+  const DASH_SPEED = 700;      // ед./с в начале рывка
+  const DASH_DURATION = 0.15;  // с; скорость линейно падает до нуля
+  const DASH_COOLDOWN = 3;     // с
+  const SPEED_MULTIPLIER = 1.6; // пикап speed
+  const TIME_EPS = 1e-9;
+
+  // Локальное состояние рывка (на сервере dashLeft/dashDir в снапшот не попадают).
+  const dash = { left: 0, cd: 0, dir: { x: 0, y: 0 } };
+  let boostFactor = 1; // из player.boosted последнего снапшота
+
+  // Путь рывка за тик — точный интеграл v(τ) = DASH_SPEED·τ/DASH_DURATION на [τ−dt, τ].
+  function dashStepDist(dt) {
+    const left = dash.left, next = Math.max(left - dt, 0);
+    dash.left = next;
+    return DASH_SPEED * (left * left - next * next) / (2 * DASH_DURATION);
+  }
+
   // Зеркало game.World.move: края мира и препятствия, оси раздельно — сначала X,
   // затем Y с уже новым X (упёршись в стену, игрок скользит вдоль неё).
+  // Во время рывка обычное управление не действует: смещение — cmd.dashMove.
   function step(pos, cmd, dt) {
     const w = net.welcome;
     const r = w.radius;
     const rx = Math.min(r, w.width / 2), ry = Math.min(r, w.height / 2);
-    const dx = cmd.moveX * w.speed * dt, dy = cmd.moveY * w.speed * dt;
+    const v = w.speed * boostFactor;
+    const dx = cmd.dashMove ? cmd.dashMove.x : cmd.moveX * v * dt;
+    const dy = cmd.dashMove ? cmd.dashMove.y : cmd.moveY * v * dt;
     if (dx !== 0) {
       let x = clamp(pos.x + dx, rx, w.width - rx);
       for (const o of w.obstacles) x = sweepAxis(pos.x, x, pos.y, o.x, o.x + o.w, o.y, o.y + o.h, r);
@@ -211,6 +241,7 @@
     err: { x: 0, y: 0 },   // визуальная ошибка после коррекции, плавно гасится
   };
   let pending = [];        // отправленные, но ещё не подтверждённые сервером команды
+  let lastCorrection = 0;  // расхождение предсказания с сервером при последней сверке (для отладки)
   let acc = 0;             // накопитель времени для фиксированного шага
   let lastFrame = 0;
 
@@ -228,6 +259,15 @@
     // ввод не применит никогда — переигрывать нечего, игрок стоит.
     pending = snap.round && snap.round.phase === "intermission" ? [] : pending.filter(c => c.seq > me.lastSeq);
 
+    boostFactor = me.boosted ? SPEED_MULTIPLIER : 1;
+    // Кулдаун рывка сверяем с сервером: после применения pending он уменьшится ещё на
+    // pending.length тиков. Если рывок начат в неподтверждённой команде — сервер о нём
+    // ещё не знает, верим локальному состоянию.
+    if (typeof me.dashCd === "number" && !pending.some(c => c.dashStart)) {
+      dash.cd = Math.max(0, me.dashCd - pending.length * dt);
+      if (!pending.some(c => c.dashMove)) dash.left = 0;
+    }
+
     // Переигрываем неподтверждённые команды поверх authoritative-позиции.
     const fixed = { x: me.x, y: me.y };
     for (const c of pending) step(fixed, c, dt);
@@ -241,6 +281,7 @@
 
     const dx = pred.pos.x - fixed.x;
     const dy = pred.pos.y - fixed.y;
+    lastCorrection = Math.hypot(dx, dy); // насколько предсказание разошлось с сервером
     if (Math.hypot(dx, dy) > SNAP_DISTANCE) {
       pred.err.x = pred.err.y = 0;           // телепорт/респаун — прыгаем сразу
     } else {
@@ -254,19 +295,39 @@
   // Один клиентский тик: формируем команду, шлём, сразу применяем локально.
   function clientTick(dt) {
     const m = moveVector(input);
-    const cmd = {
+    const msg = {
       seq: ++seq,
       moveX: m.x, moveY: m.y,
       angle: input.angle,
       fire: input.fire || fireLatched,
+      dash: dashLatched, // одноразово: true только в одном Input после нажатия Shift
       // Эти булевы поля сервер игнорирует; оставлены для совместимости/отладки.
       up: input.up, down: input.down, left: input.left, right: input.right,
     };
     fireLatched = false;
-    ws.send(JSON.stringify(cmd)); // шлём и в intermission — это ещё и heartbeat
+    dashLatched = false;
+    ws.send(JSON.stringify(msg)); // шлём и в intermission — это ещё и heartbeat
 
     pred.prev = { ...pred.pos };
-    if (frozen()) return;
+    if (frozen()) {
+      dash.left = 0; dash.cd = 0; // новый раунд на сервере сбрасывает рывок
+      return;
+    }
+
+    // Порядок как в game.displacement: кулдаун тикает, затем старт рывка, затем шаг.
+    const cmd = { seq: msg.seq, moveX: m.x, moveY: m.y };
+    dash.cd = Math.max(dash.cd - dt, 0);
+    if (msg.dash && dash.left <= TIME_EPS && dash.cd <= TIME_EPS) {
+      const l = Math.hypot(m.x, m.y);
+      dash.dir = l > 0 ? { x: m.x / l, y: m.y / l } : { x: Math.cos(input.angle), y: Math.sin(input.angle) };
+      dash.left = DASH_DURATION;
+      dash.cd = DASH_COOLDOWN;
+      cmd.dashStart = true;
+    }
+    if (dash.left > TIME_EPS) {
+      const d = dashStepDist(dt);
+      cmd.dashMove = { x: dash.dir.x * d, y: dash.dir.y * d }; // запоминаем для переигрывания
+    }
     pending.push(cmd);
     step(pred.pos, cmd, dt);
   }
@@ -306,6 +367,9 @@
 
   net.predictionReady = () => pred.ready;
   net.myAngle = () => input.angle;
+  net.dashCooldown = () => dash.cd;      // секунд до готовности рывка (предсказано)
+  net.dashCooldownMax = DASH_COOLDOWN;
+  net.lastCorrection = () => lastCorrection;
   net.mouse = () => (mouse.has ? { x: mouse.x, y: mouse.y } : null); // в координатах мира
   net.pendingCount = () => pending.length;
 })();
