@@ -1,6 +1,14 @@
 // Сетевой слой, ввод и client-side prediction своего игрока.
 (function () {
-  const WS_URL = "ws://localhost:8080/ws";
+  // Адрес сервера: по умолчанию стенд; ?server=localhost:8080 — локальный бэкенд,
+  // ?server=host или полный ?server=wss://host/path — любой другой.
+  const WS_URL = (function () {
+    const param = new URLSearchParams(location.search).get("server");
+    if (!param) return "wss://arena-ob.fly.dev/ws";
+    if (/^wss?:\/\//.test(param)) return param;
+    const local = /^(localhost|127\.0\.0\.1)(:|$)/.test(param);
+    return (local ? "ws://" : "wss://") + param + "/ws";
+  })();
 
   // Значения по умолчанию на случай старого сервера без speed/radius в welcome.
   const DEFAULT_SPEED = 200;  // единиц в секунду
