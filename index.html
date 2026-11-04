@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Arena</title>
+  <style>
+    body { margin: 0; background: #111; color: #ccc; font: 14px sans-serif;
+           display: flex; flex-direction: column; align-items: center; }
+    canvas { background: #1e1e24; margin-top: 16px; cursor: crosshair; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="800" height="600"></canvas>
+  <p>WASD / стрелки — движение, мышь — прицел, ЛКМ / пробел — огонь</p>
+
+  <script src="net.js"></script>
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    net.attachCanvas(canvas);
+
+    let R = 15; // обновляется из welcome.radius
+    const AIM_LEN = 20; // длина линии прицела от центра игрока
+
+    function draw(now) {
+      net.update(now);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const snap = net.latest;
+      const wel = net.welcome;
+
+      if (wel) R = wel.radius;
+      if (wel) ctx.setTransform(canvas.width / wel.width, 0, 0, canvas.height / wel.height, 0, 0);
+
+      if (snap && wel) {
+        // Пули
+        ctx.fillStyle = "#ffd54a";
+        for (const b of snap.bullets || []) {
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Игроки
+        for (let p of snap.players || []) {
+          const mine = p.id === wel.playerId;
+          // Своего игрока рисуем по предсказанию, остальных — как пришли с сервера.
+          if (mine && net.predictionReady()) {
+            const rp = net.renderPos();
+            p = { ...p, x: rp.x, y: rp.y, angle: net.myAngle() };
+          }
+          ctx.fillStyle = mine ? "#4caf50" : "#e05555";
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x + Math.cos(p.angle) * AIM_LEN, p.y + Math.sin(p.angle) * AIM_LEN);
+          ctx.stroke();
+
+          // hp = 0 и score = 0 — валидные значения, поэтому проверяем именно на undefined/null.
+          if (p.hp != null && p.score != null) {
+            ctx.fillStyle = "#ddd";
+            ctx.font = "11px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(`${p.hp} · ${p.score}`, p.x, p.y - R - 6);
+          }
+        }
+      }
+
+      // HUD
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#aaa";
+      ctx.font = "12px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(`${net.status}${snap ? "  tick " + snap.tick : ""}  pending ${net.pendingCount()}`, 8, 16);
+
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>
