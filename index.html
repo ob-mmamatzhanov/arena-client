@@ -51,6 +51,14 @@
       });
     };
 
+    // Нажатие огня при пустом магазине — сухой щелчок. Сервер в этом случае
+    // просто не стреляет, события shot не будет.
+    const isPlaying = (snap) => !snap.round || snap.round.phase === "play";
+    net.onFireAttempt = () => {
+      const me = net.me();
+      if (me && !me.dead && me.ammo === 0 && isPlaying(net.latest)) fx.playDryClick();
+    };
+
     function bulletColor(owner, alpha) {
       const mine = net.welcome && owner === net.welcome.playerId;
       return mine ? `rgba(255,213,74,${alpha})` : `rgba(255,138,80,${alpha})`;
@@ -109,6 +117,15 @@
           ctx.lineTo(-0.3 * r, 1.1 * r); ctx.lineTo(0.6 * r, -0.2 * r); ctx.lineTo(0.05 * r, -0.2 * r);
           ctx.closePath();
           ctx.fill(); ctx.stroke();
+        } else if (pk.type === "ammo") {
+          const r = PICKUP_R;
+          ctx.fillStyle = "#3d8bff";
+          ctx.strokeStyle = "#a9cbff";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); // ромб, чуть вытянутый по вертикали
+          ctx.moveTo(0, -1.15 * r); ctx.lineTo(0.8 * r, 0); ctx.lineTo(0, 1.15 * r); ctx.lineTo(-0.8 * r, 0);
+          ctx.closePath();
+          ctx.fill(); ctx.stroke();
         }
         ctx.restore();
       }
@@ -165,6 +182,9 @@
 
       return (latest.players || []).map(p => {
         const pa = from.get(p.id), pb = to.get(p.id);
+        // Мёртв на любом конце интервала — скрываем: иначе после респауна игрок
+        // на ~RENDER_DELAY проехал бы от точки смерти к точке появления.
+        if ((pa && pa.dead) || (pb && pb.dead)) return { ...p, dead: true };
         if (pa && pb) {
           return { ...p, x: lerp(pa.x, pb.x, t), y: lerp(pa.y, pb.y, t), angle: lerpAngle(pa.angle, pb.angle, t) };
         }
@@ -271,6 +291,41 @@
       ctx.fillText(`Следующий раунд через ${Math.max(0, Math.ceil(round.timeLeft))} с`, cx, y + 40);
     }
 
+    // ---- Патроны и смерть ----
+    // Счётчик в правом нижнем углу; на нуле мигает красным.
+    function drawAmmo(me, now) {
+      if (typeof me.ammo !== "number") return; // старый сервер без патронов
+      const empty = me.ammo === 0;
+      const x = canvas.width - 14, y = canvas.height - 14;
+      ctx.textAlign = "right";
+      ctx.font = "bold 22px monospace";
+      ctx.fillStyle = !empty ? "#e8e8e8" : Math.floor(now / 250) % 2 ? "#ff3b3b" : "#5a1d1d";
+      ctx.fillText(String(me.ammo), x, y);
+      const w = ctx.measureText(String(me.ammo)).width;
+      ctx.font = "12px sans-serif";
+      ctx.fillStyle = empty ? ctx.fillStyle : "#999";
+      ctx.fillText("патроны", x - w - 8, y - 2);
+    }
+
+    // Затемнение и крупный отсчёт до респауна. respawnIn приходит раз в тик —
+    // между снапшотами досчитываем по времени, чтобы цифра не залипала.
+    function drawDeath(me, now) {
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const left = Math.max(0, (me.respawnIn || 0) - (now - (net.latestAt || now)) / 1000);
+      const cx = canvas.width / 2, cy = canvas.height / 2;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff6b6b";
+      ctx.font = "bold 26px sans-serif";
+      ctx.fillText("Вы убиты", cx, cy - 70);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 96px sans-serif";
+      ctx.fillText(String(Math.max(1, Math.ceil(left))), cx, cy + 30);
+      ctx.fillStyle = "#bbb";
+      ctx.font = "16px sans-serif";
+      ctx.fillText("респаун", cx, cy + 62);
+    }
+
     let lastFrame = 0;
 
     function draw(now) {
@@ -300,8 +355,12 @@
         drawBullets(now);
 
         // Игроки
+        const meNow = net.me();
         for (let p of renderPlayers(now, snap)) {
           const mine = p.id === wel.playerId;
+          // Мёртвых не рисуем. Себя — по последнему снапшоту, без задержки интерполяции:
+          // свой игрок и так рисуется по предсказанию.
+          if (mine ? meNow && meNow.dead : p.dead) continue;
           // Своего игрока рисуем по предсказанию (без задержки), остальных — интерполированными.
           if (mine && net.predictionReady()) {
             const rp = net.renderPos();
@@ -321,6 +380,11 @@
           ctx.beginPath();
           ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
           ctx.fill();
+          if (p.invuln && Math.floor(now / 110) % 2 === 0) { // неуязвим — мигающий контур
+            ctx.strokeStyle = "rgba(255,255,255,0.95)";
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(p.x, p.y, R + 2.5, 0, Math.PI * 2); ctx.stroke();
+          }
           if (mine) drawDashIndicator(p.x, p.y);
 
           ctx.strokeStyle = "#fff";
@@ -339,7 +403,7 @@
           }
         }
 
-        fx.drawWorld(ctx); // частицы поверх игроков
+        fx.drawWorld(ctx, now); // кольца и частицы поверх игроков
       }
 
       // HUD и экранные эффекты — без тряски и масштаба
@@ -354,15 +418,17 @@
       ctx.fillText(`${sound}  [M]`, 8, 32);
 
       const round = snap && snap.round;
-      if (round && wel) {
-        if (round.phase === "play") {
-          drawRoundTimer(round);
+      const me = snap && wel ? net.me() : null;
+      if (snap && wel && isPlaying(snap)) {
+        if (round) drawRoundTimer(round); // у старого сервера раундов нет
+        if (me && me.dead) {
+          drawDeath(me, now);
+        } else {
+          if (me) drawAmmo(me, now);
           drawCrosshair(snap, wel, canvas.width / wel.width, canvas.height / wel.height);
-        } else if (round.phase === "intermission") {
-          drawIntermission(round, snap, wel);
         }
-      } else if (snap && wel) {
-        drawCrosshair(snap, wel, canvas.width / wel.width, canvas.height / wel.height); // старый сервер без раундов
+      } else if (round && wel && round.phase === "intermission") {
+        drawIntermission(round, snap, wel);
       }
 
       requestAnimationFrame(draw);

@@ -32,7 +32,26 @@
     particles = particles.filter(p => p.life > 0); // старые удаляются
   }
 
-  function drawParticles(ctx) {
+  // ---------------- Кольца респауна ----------------
+  // Расходятся из точки появления: радиус от r до r + RING_GROW, прозрачность гаснет.
+  const RING_MS = 600, RING_GROW = 45;
+  let rings = []; // {x, y, r, at}
+
+  function drawRings(ctx, now) {
+    rings = rings.filter(g => now - g.at < RING_MS);
+    for (const g of rings) {
+      const t = (now - g.at) / RING_MS;
+      const e = 1 - (1 - t) * (1 - t); // ease-out: быстро вылетает, медленно гаснет
+      ctx.strokeStyle = `rgba(140,220,255,${0.9 * (1 - t)})`;
+      ctx.lineWidth = 3 * (1 - t) + 1;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, g.r + RING_GROW * e, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawParticles(ctx, now) {
+    drawRings(ctx, now);
     for (const p of particles) {
       ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
       ctx.fillStyle = p.color;
@@ -138,8 +157,37 @@
     tone(990, t + 0.075, 0.09, 0.35);
   }
 
+  // Сухой щелчок пустого магазина: 15 мс шума через полосовой 3.5 кГц
+  // и тихий короткий «тук» 900 Гц — сухо и без хвоста, не путается с выстрелом.
+  function playDryClick() {
+    if (!canPlay()) return;
+    const t = audio.currentTime;
+    const src = audio.createBufferSource();
+    src.buffer = noiseBuf;
+    const bp = audio.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 3500;
+    bp.Q.value = 2;
+    const g = audio.createGain();
+    g.gain.setValueAtTime(0.7, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.015);
+    src.connect(bp).connect(g).connect(master);
+    src.start(t);
+    src.stop(t + 0.02);
+    const osc = audio.createOscillator();
+    osc.type = "square";
+    osc.frequency.value = 900;
+    const og = audio.createGain();
+    og.gain.setValueAtTime(0.08, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.012);
+    osc.connect(og).connect(master);
+    osc.start(t);
+    osc.stop(t + 0.015);
+  }
+
   // ---------------- События снапшота ----------------
   // ctx: {myId, radius, players: Map id → {x, y, angle}} — состояние на момент события.
+  // now — performance.now() получения снапшота (та же шкала, что у кадров).
   function onSnapshot(snap, now, c) {
     const events = snap.events || []; // поле omitempty: в тике без событий его нет
     // У kill нет координат — берём точку hit по той же цели из этого же тика
@@ -184,6 +232,9 @@
         case "pickup":
           if (e.playerId === c.myId) playPickup();
           break;
+        case "respawn":
+          rings.push({ x: e.x, y: e.y, r: c.radius, at: now });
+          break;
       }
     }
   }
@@ -194,6 +245,7 @@
     drawWorld: drawParticles,
     drawScreen,
     shakeOffset,
+    playDryClick,
     muted: () => muted,
     audioReady: () => !!audio && audio.state === "running",
     particleCount: () => particles.length,

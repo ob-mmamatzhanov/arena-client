@@ -126,6 +126,9 @@
   const mouse = { x: 0, y: 0, has: false };
   let seq = 0;
 
+  // Нажатие огня (не удержание) — для «сухого щелчка» при пустом магазине.
+  function fireAttempt() { if (net.onFireAttempt) net.onFireAttempt(); }
+
   window.addEventListener("keydown", (e) => {
     // Shift — одноразовый запрос рывка: уходит в ближайшем Input, удерживать не нужно.
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
@@ -137,7 +140,10 @@
     if (!k) return;
     e.preventDefault();
     input[k] = true;
-    if (k === "fire") fireLatched = true;
+    if (k === "fire") {
+      fireLatched = true;
+      if (!e.repeat) fireAttempt();
+    }
   });
   window.addEventListener("keyup", (e) => {
     const k = KEYS[e.code];
@@ -160,7 +166,7 @@
       mouse.has = true;
     });
     canvas.addEventListener("mousedown", (e) => {
-      if (e.button === 0) { input.fire = true; fireLatched = true; }
+      if (e.button === 0) { input.fire = true; fireLatched = true; fireAttempt(); }
     });
     window.addEventListener("mouseup", (e) => { if (e.button === 0) input.fire = false; });
   };
@@ -252,6 +258,9 @@
   let lastCorrection = 0;  // расхождение предсказания с сервером при последней сверке (для отладки)
   let acc = 0;             // накопитель времени для фиксированного шага
   let lastFrame = 0;
+  // Пока свой игрок мёртв, сервер отбрасывает его ввод (lastSeq не растёт):
+  // не предсказываем движение и не копим pending — иначе после респауна был бы рывок.
+  let meDead = false;
 
   function serverMe(snap) {
     if (!net.welcome) return null;
@@ -262,6 +271,20 @@
     const me = serverMe(snap);
     if (!me) return;
     const dt = 1 / net.welcome.tickRate;
+
+    if (me.dead) {
+      meDead = true;
+      pending = [];
+      dash.left = 0;
+      pred.pos = { x: me.x, y: me.y };
+      pred.prev = { ...pred.pos };
+      pred.err.x = pred.err.y = 0;
+      pred.ready = true;
+      return;
+    }
+    // Первый снапшот после респауна: позиция новая, сглаживать от точки смерти нечего.
+    const respawned = meDead;
+    meDead = false;
 
     // Всё, что сервер уже применил, больше не нужно. В intermission сервер
     // ввод не применит никогда — переигрывать нечего, игрок стоит.
@@ -280,7 +303,8 @@
     const fixed = { x: me.x, y: me.y };
     for (const c of pending) step(fixed, c, dt);
 
-    if (!pred.ready) {
+    if (!pred.ready || respawned) {
+      pred.err.x = pred.err.y = 0;
       pred.pos = { ...fixed };
       pred.prev = { ...fixed };
       pred.ready = true;
@@ -321,6 +345,8 @@
       dash.left = 0; dash.cd = 0; // новый раунд на сервере сбрасывает рывок
       return;
     }
+    if (meDead) return; // ввод мёртвого сервер не применит
+
 
     // Порядок как в game.displacement: кулдаун тикает, затем старт рывка, затем шаг.
     const cmd = { seq: msg.seq, moveX: m.x, moveY: m.y };
@@ -374,6 +400,7 @@
   };
 
   net.predictionReady = () => pred.ready;
+  net.me = () => (net.latest ? serverMe(net.latest) : null); // свой игрок из последнего снапшота
   net.myAngle = () => input.angle;
   net.dashCooldown = () => dash.cd;      // секунд до готовности рывка (предсказано)
   net.dashCooldownMax = DASH_COOLDOWN;
