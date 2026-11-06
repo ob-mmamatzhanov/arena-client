@@ -1,10 +1,10 @@
 // Сетевой слой, ввод и client-side prediction своего игрока.
 (function () {
-  // Адрес сервера: по умолчанию стенд; ?server=localhost:8080 — локальный бэкенд,
-  // ?server=host или полный ?server=wss://host/path — любой другой.
+  // Адрес сервера: по умолчанию локальный бэкенд (ws://localhost:8080/ws);
+  // ?server=arena-ob.fly.dev — стенд, ?server=host или полный ?server=wss://host/path — любой другой.
   const WS_URL = (function () {
     const param = new URLSearchParams(location.search).get("server");
-    if (!param) return "wss://arena-ob.fly.dev/ws";
+    if (!param) return "ws://localhost:8080/ws";
     if (/^wss?:\/\//.test(param)) return param;
     const local = /^(localhost|127\.0\.0\.1)(:|$)/.test(param);
     return (local ? "ws://" : "wss://") + param + "/ws";
