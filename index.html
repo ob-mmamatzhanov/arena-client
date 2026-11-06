@@ -18,7 +18,7 @@
   <script type="module">
     // Модуль выполняется после классических fx.js и net.js: window.net/window.fx уже есть.
     import { buildSprites, drawPlayer, drawPickup, drawWall, PALETTE,
-      PLAYER_SIZE, PLAYER_SCALE, PICKUP_SCALE, BULLET_SIZE } from "./sprites.js";
+      PLAYER_SIZE, PLAYER_SCALE, PICKUP_SCALE, BULLET_SIZE, CRATE_TILE } from "./sprites.js";
     const S = buildSprites(); // один раз при старте
     // Визуальный размер игрока (в ед. upright ≈ px спрайта). Серверный хитбокс не меняется.
     const PS = PLAYER_SCALE;
@@ -176,8 +176,27 @@
     }
 
     // ---- Препятствия ----
+    // Вид препятствия — поле kind из welcome: "crate" — ящик, остальное (и пустое) — стена.
     function drawObstacles(wel) {
-      for (const o of wel.obstacles) drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
+      for (const o of wel.obstacles) {
+        if (o.kind === "crate") drawCrate(o);
+        else drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
+      }
+    }
+
+    // Ящик — тайлами CRATE_TILE целиком, без паттерна, плюс тёмная кромка 1 px.
+    // Ящики кратны 32; если нет — крайний тайл обрезается (не растягивается).
+    function drawCrate(o) {
+      const k = S.crate.width / CRATE_TILE; // тайл нарисован в 2×
+      for (let ty = 0; ty < o.h; ty += CRATE_TILE) {
+        for (let tx = 0; tx < o.w; tx += CRATE_TILE) {
+          const w = Math.min(CRATE_TILE, o.w - tx), h = Math.min(CRATE_TILE, o.h - ty);
+          ctx.drawImage(S.crate, 0, 0, w * k, h * k, o.x + tx, o.y + ty, w, h);
+        }
+      }
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1); // +0.5 — линия ровно в 1 px, без размытия
     }
 
     // ---- Пол ----

@@ -148,6 +148,42 @@ export function drawWall(ctx, wallTile, x, y, w, h) {
   ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
 }
 
+// --- Ящик ----------------------------------------------------------------------
+// Тайл 32×32: доски, рамка, диагонали и гвозди. Ящики на карте кратны 32 —
+// рисуются тайлами целиком, без паттерна.
+
+export const CRATE_TILE = 32;
+
+export function makeCrate(seed = 3) {
+  const [c, ctx] = canvas(CRATE_TILE, CRATE_TILE);
+  const rnd = mulberry32(seed);
+  const wood = "#a0693a", dark = shade(wood, -0.3), light = shade(wood, 0.12);
+
+  ctx.fillStyle = dark;
+  ctx.fillRect(0, 0, CRATE_TILE, CRATE_TILE);
+  // четыре горизонтальные доски
+  for (let i = 0; i < 4; i++) {
+    ctx.fillStyle = shade(wood, (rnd() - 0.5) * 0.1);
+    ctx.fillRect(1, 1 + i * 8, CRATE_TILE - 2, 6);
+    ctx.fillStyle = light;
+    ctx.fillRect(1, 1 + i * 8, CRATE_TILE - 2, 1);
+    // волокна
+    ctx.fillStyle = shade(wood, -0.12);
+    for (let k = 0; k < 2; k++) ctx.fillRect(3 + rnd() * 20, 3 + i * 8 + rnd() * 3, 6 + rnd() * 6, 1);
+  }
+  // рамка и диагональ — классический «ящик»
+  ctx.fillStyle = dark;
+  ctx.fillRect(0, 0, CRATE_TILE, 3); ctx.fillRect(0, CRATE_TILE - 3, CRATE_TILE, 3);
+  ctx.fillRect(0, 0, 3, CRATE_TILE); ctx.fillRect(CRATE_TILE - 3, 0, 3, CRATE_TILE);
+  ctx.strokeStyle = dark; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(2, 2); ctx.lineTo(CRATE_TILE - 2, CRATE_TILE - 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CRATE_TILE - 2, 2); ctx.lineTo(2, CRATE_TILE - 2); ctx.stroke();
+  // гвозди по углам
+  ctx.fillStyle = "#d9d9d9";
+  for (const [x, y] of [[4,4],[27,4],[4,27],[27,27]]) ctx.fillRect(x, y, 2, 2);
+  return c;
+}
+
 // --- Пикапы --------------------------------------------------------------------
 
 export const PICKUP_SIZE = 16;
@@ -228,6 +264,7 @@ export function buildSprites() {
   return {
     players: PALETTE.map((_, i) => makePlayer(i)),
     wall: makeWall(),
+    crate: makeCrate(),
     floor: makeFloor(),
     bullet: makeBullet(),
     pickups: {
