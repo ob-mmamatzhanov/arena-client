@@ -188,11 +188,14 @@ export function makeCrate(seed = 3) {
 
 export const PICKUP_SIZE = 16;
 
+// Цвет свечения (r,g,b); альфу задаёт радиальный градиент в drawPickup.
 export const PICKUP_GLOW = {
-  health: "rgba(102,187,106,0.5)",
-  ammo: "rgba(79,195,247,0.5)",
-  speed: "rgba(255,213,79,0.5)",
+  health: "102,187,106",
+  ammo: "79,195,247",
+  speed: "255,213,79",
 };
+const PICKUP_GLOW_DEFAULT = "255,255,255";
+const PICKUP_GLOW_ALPHA = 0.45; // в центре; к краю — 0
 
 export function makePickup(type) {
   const [c, ctx] = canvas(PICKUP_SIZE, PICKUP_SIZE);
@@ -289,17 +292,24 @@ export function drawPlayer(ctx, frames, x, y, angle, frame = 0, scale = PLAYER_S
   ctx.restore();
 }
 
-// Пикап: текстура PICKUP_SIZE, на экран — PICKUP_SIZE·scale; свечение радиусом 14·scale.
+// Пикап: текстура PICKUP_SIZE, на экран — PICKUP_SIZE·scale; свечение радиусом 12·scale.
 // timeMs задаёт фазу покачивания — сдвигайте её по id, чтобы пикапы не качались синхронно.
 export const PICKUP_SCALE = 1.5;
 
 export function drawPickup(ctx, sprites, type, x, y, timeMs, scale = PICKUP_SCALE) {
   const bob = Math.sin(timeMs / 300) * 2 * scale;
   const size = PICKUP_SIZE * scale;
-  ctx.fillStyle = PICKUP_GLOW[type] || "rgba(255,255,255,0.3)";
+  // Свечение — радиальный градиент от центра пикапа (α 0.45) к краю (α 0), радиус 12·scale.
+  const rgb = PICKUP_GLOW[type] || PICKUP_GLOW_DEFAULT;
+  const r = 12 * scale;
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(${rgb},${PICKUP_GLOW_ALPHA})`);
+  g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.arc(x, y + 4 * scale, 14 * scale, 0, Math.PI * 2);
+  ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
+  // Спрайт — поверх градиента.
   ctx.drawImage(sprites.pickups[type], x - size / 2, y - size / 2 + bob, size, size);
 }
 
