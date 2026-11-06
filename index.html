@@ -69,8 +69,10 @@
 
     function bulletColor(owner, alpha) {
       const mine = net.welcome && owner === net.welcome.playerId;
-      return mine ? `rgba(255,213,74,${alpha})` : `rgba(255,138,80,${alpha})`;
+      // Светлые тона: прежние насыщенные (255,213,74 / 255,138,80 при α 0.4) сливались с кирпичом.
+      return mine ? `rgba(255,240,170,${alpha})` : `rgba(255,205,160,${alpha})`;
     }
+    const TRAIL_UNDERLAY = "rgba(20,12,8,0.45)"; // тёмная подложка — отделяет хвост от кирпича
 
     function drawBullets(now) {
       // Голова — последняя позиция, сдвинутая по скорости до текущего кадра (не дальше двух тиков).
@@ -81,12 +83,15 @@
         const last = v.hist[v.hist.length - 1];
         const hx = last.x + v.vx * ahead, hy = last.y + v.vy * ahead;
         if (v.hist.length > 1) {
-          ctx.strokeStyle = bulletColor(v.owner, 0.4);
-          ctx.lineWidth = 3;
           ctx.beginPath();
           ctx.moveTo(v.hist[0].x, v.hist[0].y);
           for (let i = 1; i < v.hist.length; i++) ctx.lineTo(v.hist[i].x, v.hist[i].y);
           ctx.lineTo(hx, hy);
+          ctx.strokeStyle = TRAIL_UNDERLAY; // тот же путь дважды: подложка шире, светлая линия поверх
+          ctx.lineWidth = 5;
+          ctx.stroke();
+          ctx.strokeStyle = bulletColor(v.owner, 0.85);
+          ctx.lineWidth = 3;
           ctx.stroke();
         }
         // Голова — спрайт пули центром в позиции (S.bullet в 2×, поэтому размер задаём явно).
