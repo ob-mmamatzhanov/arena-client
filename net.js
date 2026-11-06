@@ -23,20 +23,51 @@
     connected: false,
     welcome: null,   // {playerId, tickRate, width, height}
     latest: null,    // последний snapshot
-    status: "connecting...",
+    status: "connecting", // состояние сокета: connecting / connected / disconnected
   };
   window.net = net;
 
-  const ws = new WebSocket(WS_URL);
+  // ---- Сокет и реконнект ----
+  // Статус отражает только текущий сокет: события старого сокета (его close/error
+  // могут прийти уже после открытия нового) игнорируются — иначе статус залипал бы
+  // на disconnected при живом соединении.
+  const RECONNECT_MIN_MS = 500, RECONNECT_MAX_MS = 5000;
+  let ws = null;
+  let reconnectDelay = RECONNECT_MIN_MS;
+  let reconnectTimer = 0;
 
-  ws.onopen = () => { net.status = "waiting for welcome..."; };
-  ws.onclose = () => { net.connected = false; net.status = "disconnected"; };
-  ws.onerror = () => { net.status = "connection error"; };
+  function connect() {
+    clearTimeout(reconnectTimer);
+    const sock = new WebSocket(WS_URL);
+    ws = sock;
+    net.status = "connecting";
+    sock.onopen = () => {
+      if (sock !== ws) return;
+      net.status = "connected";
+      reconnectDelay = RECONNECT_MIN_MS;
+    };
+    sock.onerror = () => {
+      if (sock !== ws) return;
+      net.status = "disconnected"; // за error всегда следует close — там и реконнект
+    };
+    sock.onclose = () => {
+      if (sock !== ws) return;
+      net.connected = false;
+      net.status = "disconnected";
+      reconnectTimer = setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+    };
+    sock.onmessage = (ev) => { if (sock === ws) onMessage(ev); };
+  }
 
-  ws.onmessage = (ev) => {
+  function onMessage(ev) {
+    net.status = "connected"; // пришли данные — сокет точно жив
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "welcome") {
+      // Новое подключение (в том числе после реконнекта): новый playerId,
+      // старые предсказания и буфер снапшотов к нему не относятся.
+      resetSession();
       net.welcome = {
         playerId: msg.playerId,
         tickRate: msg.tickRate,
@@ -47,7 +78,6 @@
         obstacles: Array.isArray(msg.obstacles) ? msg.obstacles : [],
       };
       net.connected = true;
-      net.status = "connected";
     } else if (msg.type === "snapshot") {
       net.latest = msg;
       net.latestAt = performance.now();
@@ -57,7 +87,7 @@
       // а не только последний к кадру, чтобы события не терялись.
       if (net.onSnapshot) net.onSnapshot(msg, net.latestAt);
     }
-  };
+  }
 
   // ---- Буфер снапшотов для интерполяции ----
   // Храним не два, а все снапшоты за последнюю секунду: при 20 Гц два последних
@@ -262,6 +292,21 @@
   // не предсказываем движение и не копим pending — иначе после респауна был бы рывок.
   let meDead = false;
 
+  // Сброс состояния сессии при новом welcome (реконнект или перезапуск сервера).
+  function resetSession() {
+    net.latest = null;
+    net.snapshots = [];
+    clockOffset = null;
+    lastTick = -1;
+    pred.ready = false;
+    pred.err.x = pred.err.y = 0;
+    pending = [];
+    acc = 0;
+    meDead = false;
+    dash.left = 0; dash.cd = 0;
+    boostFactor = 1;
+  }
+
   function serverMe(snap) {
     if (!net.welcome) return null;
     return (snap.players || []).find(p => p.id === net.welcome.playerId) || null;
@@ -407,4 +452,6 @@
   net.lastCorrection = () => lastCorrection;
   net.mouse = () => (mouse.has ? { x: mouse.x, y: mouse.y } : null); // в координатах мира
   net.pendingCount = () => pending.length;
+
+  connect(); // в конце: все let/const выше уже инициализированы
 })();

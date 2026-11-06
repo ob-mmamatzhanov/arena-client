@@ -9,7 +9,7 @@ export const PALETTE = [
   "#ffd54f", // 3 жёлтый
   "#ba68c8", // 4 фиолетовый
   "#f06292", // 5 розовый
-  "#4db6ac", // 6 бирюзовый
+  "#5c6bc0", // 6 индиго (бирюзовый путался с голубым, коралловый — с оранжевым и розовым)
   "#e0e0e0", // 7 светло-серый
 ];
 
@@ -153,9 +153,9 @@ export function drawWall(ctx, wallTile, x, y, w, h) {
 export const PICKUP_SIZE = 16;
 
 export const PICKUP_GLOW = {
-  health: "rgba(102,187,106,0.35)",
-  ammo: "rgba(79,195,247,0.35)",
-  speed: "rgba(255,213,79,0.35)",
+  health: "rgba(102,187,106,0.5)",
+  ammo: "rgba(79,195,247,0.5)",
+  speed: "rgba(255,213,79,0.5)",
 };
 
 export function makePickup(type) {
@@ -192,12 +192,16 @@ export function makePickup(type) {
 
 // --- Пуля и прочее ---------------------------------------------------------------
 
+// Ядро радиусом 2.5 и свечение 5: при 2/4 пуля терялась на кирпиче.
+export const BULLET_SIZE = 10;
+
 export function makeBullet() {
-  const [c, ctx] = canvas(8, 8);
+  const [c, ctx] = canvas(BULLET_SIZE, BULLET_SIZE);
+  const m = BULLET_SIZE / 2;
   ctx.fillStyle = "rgba(255,241,118,0.5)";
-  circle(ctx, 4, 4, 4);
+  circle(ctx, m, m, 5);
   ctx.fillStyle = "#fff59d";
-  circle(ctx, 4, 4, 2);
+  circle(ctx, m, m, 2.5);
   return c;
 }
 
@@ -235,23 +239,31 @@ export function buildSprites() {
 }
 
 // Рисует персонажа с поворотом. frame — индекс кадра ходьбы.
-export function drawPlayer(ctx, frames, x, y, angle, frame = 0) {
+// scale — только визуал: спрайт PLAYER_SIZE·scale, центр и поворот те же.
+export const PLAYER_SCALE = 1.4;
+
+export function drawPlayer(ctx, frames, x, y, angle, frame = 0, scale = PLAYER_SCALE) {
   const img = frames[frame % frames.length];
+  const size = PLAYER_SIZE * scale;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
-  ctx.drawImage(img, -PLAYER_SIZE / 2, -PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE);
+  ctx.drawImage(img, -size / 2, -size / 2, size, size);
   ctx.restore();
 }
 
-export function drawPickup(ctx, sprites, type, x, y, timeMs) {
-  const bob = Math.sin(timeMs / 300) * 2;
-  ctx.fillStyle = PICKUP_GLOW[type] || "rgba(255,255,255,0.2)";
+// Пикап: текстура PICKUP_SIZE, на экран — PICKUP_SIZE·scale; свечение радиусом 14·scale.
+// timeMs задаёт фазу покачивания — сдвигайте её по id, чтобы пикапы не качались синхронно.
+export const PICKUP_SCALE = 1.5;
+
+export function drawPickup(ctx, sprites, type, x, y, timeMs, scale = PICKUP_SCALE) {
+  const bob = Math.sin(timeMs / 300) * 2 * scale;
+  const size = PICKUP_SIZE * scale;
+  ctx.fillStyle = PICKUP_GLOW[type] || "rgba(255,255,255,0.3)";
   ctx.beginPath();
-  ctx.arc(x, y + 4, 10, 0, Math.PI * 2);
+  ctx.arc(x, y + 4 * scale, 14 * scale, 0, Math.PI * 2);
   ctx.fill();
-  ctx.drawImage(sprites.pickups[type], x - PICKUP_SIZE / 2, y - PICKUP_SIZE / 2 + bob,
-    PICKUP_SIZE, PICKUP_SIZE);
+  ctx.drawImage(sprites.pickups[type], x - size / 2, y - size / 2 + bob, size, size);
 }
 
 // --- Утилиты ---------------------------------------------------------------------

@@ -17,8 +17,12 @@
   <script src="net.js"></script>
   <script type="module">
     // Модуль выполняется после классических fx.js и net.js: window.net/window.fx уже есть.
-    import { buildSprites, drawPlayer, drawPickup, drawWall, PALETTE } from "./sprites.js";
+    import { buildSprites, drawPlayer, drawPickup, drawWall, PALETTE,
+      PLAYER_SIZE, PLAYER_SCALE, PICKUP_SCALE, BULLET_SIZE } from "./sprites.js";
     const S = buildSprites(); // один раз при старте
+    // Визуальный размер игрока (в ед. upright ≈ px спрайта). Серверный хитбокс не меняется.
+    const PS = PLAYER_SCALE;
+    const P_HALF = PLAYER_SIZE * PS / 2;
 
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
@@ -85,8 +89,9 @@
           ctx.lineTo(hx, hy);
           ctx.stroke();
         }
-        // Голова — спрайт пули 8×8 центром в позиции (S.bullet в 2×, поэтому размер задаём явно).
-        upright(hx, hy, 0, () => ctx.drawImage(S.bullet, -4, -4, 8, 8));
+        // Голова — спрайт пули центром в позиции (S.bullet в 2×, поэтому размер задаём явно).
+        // Пули рисуются после стен и до игроков — см. порядок в draw().
+        upright(hx, hy, 0, () => ctx.drawImage(S.bullet, -BULLET_SIZE / 2, -BULLET_SIZE / 2, BULLET_SIZE, BULLET_SIZE));
       }
     }
 
@@ -95,12 +100,12 @@
       for (const pk of snap.pickups || []) {
         // Сдвиг фазы по id, чтобы соседние пикапы не качались синхронно.
         if (!S.pickups[pk.type]) continue;
-        upright(pk.x, pk.y, 0, () => drawPickup(ctx, S, pk.type, 0, 0, now + pk.id * 137));
+        upright(pk.x, pk.y, 0, () => drawPickup(ctx, S, pk.type, 0, 0, now + pk.id * 137, PICKUP_SCALE));
       }
     }
 
     // ---- Индикатор рывка: дуга вокруг своего игрока (в системе upright) ----
-    const DASH_RING_R = 20;
+    const DASH_RING_R = P_HALF + 5;
     function drawDashIndicator() {
       const cd = net.dashCooldown(), max = net.dashCooldownMax;
       const ready = cd <= 0;
@@ -249,15 +254,17 @@
     }
     const playerName = (p) => p.name || `Игрок ${p.id}`; // имени в протоколе пока нет
 
-    // hp-полоска 24×3 под игроком, от зелёного (100) к красному (0); при полном hp не рисуем.
+    // hp-полоска под игроком (24×3 при масштабе 1, растёт вместе со спрайтом),
+    // от зелёного (100) к красному (0); при полном hp не рисуем.
     const HP_MAX = 100;
+    const HP_W = 24 * PS, HP_H = 3 * PS, HP_Y = P_HALF + 2;
     function drawHpBar(hp) {
       if (hp >= HP_MAX) return;
       const f = Math.max(0, Math.min(1, hp / HP_MAX));
       ctx.fillStyle = "rgba(0,0,0,0.6)";
-      ctx.fillRect(-13, 19, 26, 5);
+      ctx.fillRect(-HP_W / 2 - 1, HP_Y - 1, HP_W + 2, HP_H + 2);
       ctx.fillStyle = `hsl(${Math.round(120 * f)},85%,50%)`;
-      ctx.fillRect(-12, 20, 24 * f, 3);
+      ctx.fillRect(-HP_W / 2, HP_Y, HP_W * f, HP_H);
     }
 
     // Один игрок в экранной системе upright: (0,0) — центр, 1 ед. ≈ 1 px спрайта.
@@ -272,7 +279,7 @@
           ctx.save();
           ctx.globalAlpha = alpha;
           // смещение в мировых ед. → экранные px → ед. upright
-          drawPlayer(ctx, frames, (q.x - p.x) * worldSx / m.a, (q.y - p.y) * worldSy / m.d, angle, frame);
+          drawPlayer(ctx, frames, (q.x - p.x) * worldSx / m.a, (q.y - p.y) * worldSy / m.d, angle, frame, PS);
           ctx.restore();
         });
       }
@@ -283,23 +290,23 @@
         ctx.shadowBlur = 14 + 4 * Math.sin(now / 120);
         ctx.strokeStyle = "#ffe27a";
         ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, 0, 18 * PS, 0, Math.PI * 2); ctx.stroke();
         ctx.restore();
       }
-      if (mine) { // свой — белое кольцо под спрайтом
+      if (mine) { // свой — белое кольцо под спрайтом (радиус 16 при масштабе 1)
         ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.stroke();
+        ctx.lineWidth = 1.5 * PS;
+        ctx.beginPath(); ctx.arc(0, 0, 16 * PS, 0, Math.PI * 2); ctx.stroke();
       }
 
       ctx.save();
       if (p.invuln) ctx.globalAlpha = Math.floor(now / 110) % 2 ? 0.35 : 0.9; // неуязвим — мигание
-      drawPlayer(ctx, frames, 0, 0, angle, frame);
+      drawPlayer(ctx, frames, 0, 0, angle, frame, PS);
       ctx.restore();
 
       if (now - (flashAt.get(p.id) ?? -Infinity) < FLASH_MS) { // попадание — белая вспышка
         ctx.fillStyle = "rgba(255,255,255,0.65)";
-        ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(0, 0, 12 * PS, 0, Math.PI * 2); ctx.fill();
       }
       if (mine) drawDashIndicator();
 
@@ -308,9 +315,9 @@
       ctx.textAlign = "center";
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(0,0,0,0.7)";
-      ctx.strokeText(playerName(p), 0, -21);
+      ctx.strokeText(playerName(p), 0, -P_HALF - 4);
       ctx.fillStyle = PALETTE[playerColor(p)];
-      ctx.fillText(playerName(p), 0, -21);
+      ctx.fillText(playerName(p), 0, -P_HALF - 4);
       if (p.hp != null) drawHpBar(p.hp); // hp = 0 — валидное значение
     }
 
