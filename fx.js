@@ -214,13 +214,17 @@
             speed: [60, 180], life: [0.2, 0.4], size: [1.2, 2.2], colors: ["#d8d8d8", "#ffb070", "#999"],
           });
           break;
-        case "hit":
+        case "hit": {
+          // Цвет цели (PALETTE[color]) + белые искры; без colorOf — старые красные.
+          const col = c.colorOf && c.colorOf(e.targetId);
           burst(e.x, e.y, 10, {
-            speed: [80, 240], life: [0.25, 0.5], size: [1.5, 3], colors: ["#ff3b3b", "#c41d1d", "#ff7070"],
+            speed: [80, 240], life: [0.25, 0.5], size: [1.5, 3],
+            colors: col ? [col, col, "#ffffff"] : ["#ff3b3b", "#c41d1d", "#ff7070"],
           });
           if (e.targetId === c.myId) { flashAt = now; shakeAt = now; }
           playHit();
           break;
+        }
         case "kill": {
           const h = hitPos.get(e.targetId) || c.players.get(e.targetId);
           if (!h) break;

@@ -15,13 +15,16 @@
 
   <script src="fx.js"></script>
   <script src="net.js"></script>
-  <script>
+  <script type="module">
+    // Модуль выполняется после классических fx.js и net.js: window.net/window.fx уже есть.
+    import { buildSprites, drawPlayer, drawPickup, drawWall, PALETTE } from "./sprites.js";
+    const S = buildSprites(); // один раз при старте
+
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
     net.attachCanvas(canvas);
 
-    let R = 15; // обновляется из welcome.radius
-    const AIM_LEN = 20; // длина линии прицела от центра игрока
+    let worldSx = 1, worldSy = 1; // масштаб мир → холст, обновляется в draw
 
     // ---- Пули: след из последних позиций ----
     const TRAIL_POINTS = 4;    // сколько последних позиций из снапшотов хранить на пулю
@@ -48,6 +51,7 @@
         myId: net.welcome.playerId,
         radius: net.welcome.radius,
         players: new Map((snap.players || []).map(p => [p.id, p])),
+        colorOf: colorOfId, // цвет игрока из PALETTE — для частиц попадания
       });
     };
 
@@ -81,70 +85,35 @@
           ctx.lineTo(hx, hy);
           ctx.stroke();
         }
-        ctx.fillStyle = bulletColor(v.owner, 1);
-        ctx.beginPath();
-        ctx.arc(hx, hy, 4, 0, Math.PI * 2);
-        ctx.fill();
+        // Голова — спрайт пули 8×8 центром в позиции (S.bullet в 2×, поэтому размер задаём явно).
+        upright(hx, hy, 0, () => ctx.drawImage(S.bullet, -4, -4, 8, 8));
       }
     }
 
     // ---- Пикапы ----
-    const PICKUP_R = 10; // game.DefaultConfig().PickupRadius; в протоколе его нет
-
     function drawPickups(snap, now) {
       for (const pk of snap.pickups || []) {
-        const s = 1 + 0.12 * Math.sin(now / 160 + pk.id); // лёгкая пульсация масштаба
-        ctx.save();
-        ctx.translate(pk.x, pk.y);
-        ctx.scale(s, s);
-        if (pk.type === "health") {
-          const a = PICKUP_R, t = PICKUP_R * 0.38; // крест: длина плеча и полутолщина
-          ctx.fillStyle = "#3ddc6a";
-          ctx.strokeStyle = "#0f5f28";
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.moveTo(-t, -a); ctx.lineTo(t, -a); ctx.lineTo(t, -t); ctx.lineTo(a, -t); ctx.lineTo(a, t);
-          ctx.lineTo(t, t); ctx.lineTo(t, a); ctx.lineTo(-t, a); ctx.lineTo(-t, t); ctx.lineTo(-a, t);
-          ctx.lineTo(-a, -t); ctx.lineTo(-t, -t); ctx.closePath();
-          ctx.fill(); ctx.stroke();
-        } else if (pk.type === "speed") {
-          const r = PICKUP_R;
-          ctx.fillStyle = "#ffd54a";
-          ctx.strokeStyle = "#7a5b00";
-          ctx.lineWidth = 1.5;
-          ctx.beginPath(); // молния
-          ctx.moveTo(0.25 * r, -1.1 * r); ctx.lineTo(-0.6 * r, 0.15 * r); ctx.lineTo(-0.05 * r, 0.15 * r);
-          ctx.lineTo(-0.3 * r, 1.1 * r); ctx.lineTo(0.6 * r, -0.2 * r); ctx.lineTo(0.05 * r, -0.2 * r);
-          ctx.closePath();
-          ctx.fill(); ctx.stroke();
-        } else if (pk.type === "ammo") {
-          const r = PICKUP_R;
-          ctx.fillStyle = "#3d8bff";
-          ctx.strokeStyle = "#a9cbff";
-          ctx.lineWidth = 1.5;
-          ctx.beginPath(); // ромб, чуть вытянутый по вертикали
-          ctx.moveTo(0, -1.15 * r); ctx.lineTo(0.8 * r, 0); ctx.lineTo(0, 1.15 * r); ctx.lineTo(-0.8 * r, 0);
-          ctx.closePath();
-          ctx.fill(); ctx.stroke();
-        }
-        ctx.restore();
+        // Сдвиг фазы по id, чтобы соседние пикапы не качались синхронно.
+        if (!S.pickups[pk.type]) continue;
+        upright(pk.x, pk.y, 0, () => drawPickup(ctx, S, pk.type, 0, 0, now + pk.id * 137));
       }
     }
 
-    // ---- Индикатор рывка: дуга вокруг своего кружка ----
-    function drawDashIndicator(x, y) {
+    // ---- Индикатор рывка: дуга вокруг своего игрока (в системе upright) ----
+    const DASH_RING_R = 20;
+    function drawDashIndicator() {
       const cd = net.dashCooldown(), max = net.dashCooldownMax;
       const ready = cd <= 0;
       const frac = ready ? 1 : 1 - cd / max;
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2;
       ctx.lineCap = "round";
       if (!ready) { // подложка — полный круг, поверх — сколько уже восстановилось
         ctx.strokeStyle = "rgba(255,255,255,0.12)";
-        ctx.beginPath(); ctx.arc(x, y, R + 6, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, 0, DASH_RING_R, 0, Math.PI * 2); ctx.stroke();
       }
       ctx.strokeStyle = ready ? "rgba(110,200,255,0.85)" : "rgba(110,200,255,0.55)";
       ctx.beginPath();
-      ctx.arc(x, y, R + 6, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.arc(0, 0, DASH_RING_R, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
       ctx.stroke();
     }
 
@@ -195,13 +164,154 @@
 
     // ---- Препятствия ----
     function drawObstacles(wel) {
-      ctx.fillStyle = "#55575f";
-      ctx.strokeStyle = "#6c6f78";
-      ctx.lineWidth = 2;
-      for (const o of wel.obstacles) {
-        ctx.fillRect(o.x, o.y, o.w, o.h);
-        ctx.strokeRect(o.x, o.y, o.w, o.h);
+      for (const o of wel.obstacles) drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
+    }
+
+    // ---- Пол ----
+    // Заливаем весь холст в экранных координатах (только сдвиг тряски): тайлы остаются
+    // квадратными. Тот же приём, что в drawWall: тайл нарисован в 2×, сжимаем scale(1/2).
+    const SPRITE_SCALE = S.floor.width / 32; // тайл пола — 32 логических px
+    const SHAKE_MARGIN = 8;                  // запас под сдвиг тряски
+    let floorPattern = null;
+    function drawFloor() {
+      floorPattern = floorPattern || ctx.createPattern(S.floor, "repeat");
+      ctx.save();
+      ctx.scale(1 / SPRITE_SCALE, 1 / SPRITE_SCALE);
+      ctx.fillStyle = floorPattern;
+      ctx.fillRect(-SHAKE_MARGIN * SPRITE_SCALE, -SHAKE_MARGIN * SPRITE_SCALE,
+        (canvas.width + 2 * SHAKE_MARGIN) * SPRITE_SCALE, (canvas.height + 2 * SHAKE_MARGIN) * SPRITE_SCALE);
+      ctx.restore();
+    }
+
+    // ---- Движение по кадрам: ходьба и след рывка ----
+    // По id храним отображаемую (интерполированную/предсказанную) позицию прошлого кадра
+    // и короткую историю позиций для следа рывка.
+    const WALK_MIN_PX = 0.5;    // сдвиг на экране за кадр, после которого игрок «идёт»
+    const WALK_HOLD_MS = 120;   // см. walkFrame
+    const DASH_MIN_SPEED = 450; // ед./с: обычный бег 200, с ускорением 320, первый тик рывка ~580
+    const TELEPORT_DIST = 60;   // скачок больше этого за кадр — респаун/коррекция, не рывок
+    const DASH_TRAIL_MS = 160;  // сколько держится след после обнаружения рывка
+    const HIST_MS = 100;
+    const motion = new Map();   // id -> {x, y, t, movedAt, dashAt, hist: [{x, y, t}]}
+
+    function track(p, now) {
+      let s = motion.get(p.id);
+      if (!s) motion.set(p.id, s = { x: p.x, y: p.y, t: now, movedAt: -Infinity, dashAt: -Infinity, hist: [] });
+      const m = ctx.getTransform();
+      const dx = p.x - s.x, dy = p.y - s.y;
+      const d = Math.hypot(dx, dy), dt = (now - s.t) / 1000;
+      if (Math.hypot(dx * m.a, dy * m.d) > WALK_MIN_PX) s.movedAt = now;
+      if (dt > 0 && d < TELEPORT_DIST && d / dt > DASH_MIN_SPEED) s.dashAt = now;
+      if (d >= TELEPORT_DIST) s.hist = [];
+      s.x = p.x; s.y = p.y; s.t = now;
+      s.hist.push({ x: p.x, y: p.y, t: now });
+      while (s.hist.length && s.hist[0].t < now - HIST_MS) s.hist.shift();
+      return s;
+    }
+
+    // Кадр ходьбы. Удержание WALK_HOLD_MS: когда пары снапшотов нет (или интерполяция
+    // выключена), чужой игрок сдвигается только раз в тик, и без удержания ноги
+    // мигали бы между шагом и стойкой.
+    function walkFrame(s, now) {
+      return now - s.movedAt < WALK_HOLD_MS ? Math.floor(now / 120) % 4 : 0;
+    }
+
+    // Позиция из истории примерно ago мс назад (ближайшая не новее).
+    function pastPos(s, now, ago) {
+      for (let i = s.hist.length - 1; i >= 0; i--) if (s.hist[i].t <= now - ago) return s.hist[i];
+      return s.hist[0];
+    }
+
+    // Убираем записи ушедших игроков.
+    function pruneMotion(players) {
+      const ids = new Set(players.map(p => p.id));
+      for (const id of motion.keys()) if (!ids.has(id)) motion.delete(id);
+    }
+
+    // Мир растянут неравномерно (1000×1000 → 800×600): повёрнутый спрайт в таком
+    // преобразовании скашивается. Поэтому спрайты рисуем в экранных координатах
+    // с равномерным масштабом k, а угол переводим в экранный — ствол смотрит на курсор.
+    function upright(x, y, angle, fn) {
+      const m = ctx.getTransform(); // текущий мировой: тряска + масштаб, без поворота
+      const k = Math.sqrt(m.a * m.d);
+      ctx.save();
+      ctx.setTransform(k, 0, 0, k, m.a * x + m.e, m.d * y + m.f);
+      fn(Math.atan2(Math.sin(angle) * m.d, Math.cos(angle) * m.a));
+      ctx.restore();
+    }
+
+    // В протоколе пока нет color — пока сервер его не шлёт, цвет выводим из id.
+    const playerColor = (p) => (typeof p.color === "number" ? p.color : p.id) % PALETTE.length;
+    // Цвет по id — для табло, лидерборда и частиц, где под рукой только id.
+    function colorOfId(id) {
+      const p = net.latest && (net.latest.players || []).find(q => q.id === id);
+      return PALETTE[playerColor(p || { id })];
+    }
+    const playerName = (p) => p.name || `Игрок ${p.id}`; // имени в протоколе пока нет
+
+    // hp-полоска 24×3 под игроком, от зелёного (100) к красному (0); при полном hp не рисуем.
+    const HP_MAX = 100;
+    function drawHpBar(hp) {
+      if (hp >= HP_MAX) return;
+      const f = Math.max(0, Math.min(1, hp / HP_MAX));
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(-13, 19, 26, 5);
+      ctx.fillStyle = `hsl(${Math.round(120 * f)},85%,50%)`;
+      ctx.fillRect(-12, 20, 24 * f, 3);
+    }
+
+    // Один игрок в экранной системе upright: (0,0) — центр, 1 ед. ≈ 1 px спрайта.
+    function drawPlayerSprite(p, s, angle, now, mine) {
+      const frames = S.players[playerColor(p)];
+      const frame = walkFrame(s, now);
+
+      if (now - s.dashAt < DASH_TRAIL_MS) { // рывок — две полупрозрачные копии позади
+        const m = ctx.getTransform(); // upright: масштаб k, центр игрока
+        [[60, 0.15], [30, 0.3]].forEach(([ago, alpha]) => {
+          const q = pastPos(s, now, ago);
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          // смещение в мировых ед. → экранные px → ед. upright
+          drawPlayer(ctx, frames, (q.x - p.x) * worldSx / m.a, (q.y - p.y) * worldSy / m.d, angle, frame);
+          ctx.restore();
+        });
       }
+
+      if (p.boosted) { // ускорение от пикапа — светящийся контур
+        ctx.save();
+        ctx.shadowColor = "#ffd54a";
+        ctx.shadowBlur = 14 + 4 * Math.sin(now / 120);
+        ctx.strokeStyle = "#ffe27a";
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+      if (mine) { // свой — белое кольцо под спрайтом
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.stroke();
+      }
+
+      ctx.save();
+      if (p.invuln) ctx.globalAlpha = Math.floor(now / 110) % 2 ? 0.35 : 0.9; // неуязвим — мигание
+      drawPlayer(ctx, frames, 0, 0, angle, frame);
+      ctx.restore();
+
+      if (now - (flashAt.get(p.id) ?? -Infinity) < FLASH_MS) { // попадание — белая вспышка
+        ctx.fillStyle = "rgba(255,255,255,0.65)";
+        ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+      }
+      if (mine) drawDashIndicator();
+
+      // Имя над игроком, hp-полоска под ним.
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.strokeText(playerName(p), 0, -21);
+      ctx.fillStyle = PALETTE[playerColor(p)];
+      ctx.fillText(playerName(p), 0, -21);
+      if (p.hp != null) drawHpBar(p.hp); // hp = 0 — валидное значение
     }
 
     // ---- Прицел с разбросом ----
@@ -246,6 +356,25 @@
       ctx.fillText(fmtTime(round.timeLeft), canvas.width - 10, 22);
     }
 
+    // ---- Лидерборд во время игры: правый верхний угол, под таймером ----
+    const LB_ROWS = 5;
+    function drawLeaderboard(snap, wel) {
+      const rows = (snap.players || []).slice().sort((a, b) => b.score - a.score || a.id - b.id).slice(0, LB_ROWS);
+      const x = canvas.width - 10;
+      let y = 46;
+      for (const p of rows) {
+        const isMe = p.id === wel.playerId; // свой — жирным
+        const text = `${playerName(p)}  ${p.score}`;
+        ctx.font = isMe ? "bold 12px monospace" : "12px monospace";
+        ctx.textAlign = "right";
+        ctx.fillStyle = PALETTE[playerColor(p)];
+        ctx.fillText(text, x, y);
+        const w = ctx.measureText(text).width;
+        ctx.beginPath(); ctx.arc(x - w - 8, y - 4, 4, 0, Math.PI * 2); ctx.fill();
+        y += 16;
+      }
+    }
+
     function drawIntermission(round, snap, wel) {
       ctx.fillStyle = "rgba(10,10,14,0.72)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -261,7 +390,7 @@
       ctx.font = "bold 28px sans-serif";
       ctx.fillText("Раунд окончен", cx, 110);
       ctx.font = "18px sans-serif";
-      ctx.fillStyle = winner ? "#ffd54a" : "#bbb";
+      ctx.fillStyle = winner ? colorOfId(winner) : "#bbb";
       ctx.fillText(winner ? `Победитель: игрок ${winner}${winner === wel.playerId ? " (вы)" : ""}` : "Ничья", cx, 142);
 
       const rowH = 30, w = 280, x0 = cx - w / 2;
@@ -277,9 +406,11 @@
         ctx.fillRect(x0, y, w, rowH);
         if (isWinner) { ctx.strokeStyle = "#ffd54a"; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y + 1, w - 2, rowH - 2); }
         ctx.font = isWinner ? "bold 16px monospace" : "16px monospace";
-        ctx.fillStyle = isWinner ? "#ffd54a" : isMe ? "#7ddc81" : "#e8e8e8";
+        ctx.fillStyle = colorOfId(r.id); // цвет игрока, как у его спрайта
+        ctx.beginPath(); ctx.arc(x0 + 44, y + rowH / 2, 5, 0, Math.PI * 2); ctx.fill();
         ctx.textAlign = "left";
-        ctx.fillText(`${i + 1}  ${r.id}${isMe ? " (вы)" : ""}${isWinner ? "  ★" : ""}`, x0 + 12, y + 21);
+        ctx.fillText(`${i + 1}`, x0 + 12, y + 21);
+        ctx.fillText(`${r.id}${isMe ? " (вы)" : ""}${isWinner ? "  ★" : ""}`, x0 + 56, y + 21);
         ctx.textAlign = "right";
         ctx.fillText(String(r.score), x0 + w - 12, y + 21);
         y += rowH;
@@ -340,13 +471,15 @@
       const snap = net.latest;
       const wel = net.welcome;
 
+      // Тряска: сдвиг камеры (в экранных px) — для пола и мира.
+      const sh = wel ? fx.shakeOffset(now) : { x: 0, y: 0 };
+      ctx.translate(sh.x, sh.y);
+      drawFloor(); // фон — паттерн на весь холст, до масштаба мира
+
       if (wel) {
-        R = wel.radius;
-        // Тряска: сдвиг камеры (в экранных px) перед отрисовкой мира, затем масштаб мира.
-        const sh = fx.shakeOffset(now);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.translate(sh.x, sh.y);
-        ctx.scale(canvas.width / wel.width, canvas.height / wel.height);
+        worldSx = canvas.width / wel.width;
+        worldSy = canvas.height / wel.height;
+        ctx.scale(worldSx, worldSy);
         drawObstacles(wel); // под пулями и игроками
       }
 
@@ -356,54 +489,23 @@
 
         // Игроки
         const meNow = net.me();
-        for (let p of renderPlayers(now, snap)) {
+        const list = renderPlayers(now, snap);
+        pruneMotion(list);
+        for (let p of list) {
           const mine = p.id === wel.playerId;
           // Мёртвых не рисуем. Себя — по последнему снапшоту, без задержки интерполяции:
           // свой игрок и так рисуется по предсказанию.
-          if (mine ? meNow && meNow.dead : p.dead) continue;
+          if (mine ? meNow && meNow.dead : p.dead) { motion.delete(p.id); continue; }
           // Своего игрока рисуем по предсказанию (без задержки), остальных — интерполированными.
           if (mine && net.predictionReady()) {
             const rp = net.renderPos();
             p = { ...p, x: rp.x, y: rp.y, angle: net.myAngle() };
           }
-          const flashed = now - (flashAt.get(p.id) ?? -Infinity) < FLASH_MS;
-          if (p.boosted) { // ускорение от пикапа — светящийся контур
-            ctx.save();
-            ctx.shadowColor = "#ffd54a";
-            ctx.shadowBlur = 14 + 4 * Math.sin(now / 120);
-            ctx.strokeStyle = "#ffe27a";
-            ctx.lineWidth = 3;
-            ctx.beginPath(); ctx.arc(p.x, p.y, R + 2, 0, Math.PI * 2); ctx.stroke();
-            ctx.restore();
-          }
-          ctx.fillStyle = flashed ? "#ffffff" : mine ? "#4caf50" : "#e05555";
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
-          ctx.fill();
-          if (p.invuln && Math.floor(now / 110) % 2 === 0) { // неуязвим — мигающий контур
-            ctx.strokeStyle = "rgba(255,255,255,0.95)";
-            ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(p.x, p.y, R + 2.5, 0, Math.PI * 2); ctx.stroke();
-          }
-          if (mine) drawDashIndicator(p.x, p.y);
-
-          ctx.strokeStyle = "#fff";
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.moveTo(p.x, p.y);
-          ctx.lineTo(p.x + Math.cos(p.angle) * AIM_LEN, p.y + Math.sin(p.angle) * AIM_LEN);
-          ctx.stroke();
-
-          // hp = 0 и score = 0 — валидные значения, поэтому проверяем именно на undefined/null.
-          if (p.hp != null && p.score != null) {
-            ctx.fillStyle = "#ddd";
-            ctx.font = "11px sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText(`${p.hp} · ${p.score}`, p.x, p.y - R - 6);
-          }
+          const s = track(p, now);
+          upright(p.x, p.y, p.angle, (a) => drawPlayerSprite(p, s, a, now, mine));
         }
 
-        fx.drawWorld(ctx, now); // кольца и частицы поверх игроков
+        fx.drawWorld(ctx, now); // кольца и частицы поверх спрайтов
       }
 
       // HUD и экранные эффекты — без тряски и масштаба
@@ -421,6 +523,7 @@
       const me = snap && wel ? net.me() : null;
       if (snap && wel && isPlaying(snap)) {
         if (round) drawRoundTimer(round); // у старого сервера раундов нет
+        drawLeaderboard(snap, wel);       // до оверлея смерти — он ложится поверх
         if (me && me.dead) {
           drawDeath(me, now);
         } else {
