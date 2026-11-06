@@ -49,7 +49,10 @@
       }
       for (const id of bullets.keys()) if (!seen.has(id)) bullets.delete(id);
 
-      for (const e of snap.events || []) if (e.type === "hit") flashAt.set(e.targetId, now);
+      for (const e of snap.events || []) {
+        if (e.type === "hit") flashAt.set(e.targetId, now);
+        if (e.type === "kill" && e.shooterId === net.welcome.playerId && e.targetId !== e.shooterId) plusOnes.push(now);
+      }
 
       fx.onSnapshot(snap, now, {
         myId: net.welcome.playerId,
@@ -368,24 +371,75 @@
       ctx.fillText(fmtTime(round.timeLeft), canvas.width - 10, 22);
     }
 
-    // ---- Лидерборд во время игры: правый верхний угол, под таймером ----
-    const LB_ROWS = 5;
-    function drawLeaderboard(snap, wel) {
-      const rows = (snap.players || []).slice().sort((a, b) => b.score - a.score || a.id - b.id).slice(0, LB_ROWS);
-      const x = canvas.width - 10;
-      let y = 46;
+    // ---- Табло по удержанию Tab (во время раунда) ----
+    // preventDefault и на keydown, и на keyup: иначе Tab уводит фокус с холста.
+    let tabHeld = false;
+    window.addEventListener("keydown", (e) => { if (e.code === "Tab") { e.preventDefault(); tabHeld = true; } });
+    window.addEventListener("keyup", (e) => { if (e.code === "Tab") { e.preventDefault(); tabHeld = false; } });
+    window.addEventListener("blur", () => { tabHeld = false; }); // отпустили Tab вне окна
+
+    function drawScoreOverlay(snap, wel) {
+      const rows = (snap.players || []).slice().sort((a, b) => b.score - a.score || a.id - b.id);
+      const rowH = 28, w = 300, padTop = 52;
+      const h = padTop + rows.length * rowH + 16;
+      const x0 = (canvas.width - w) / 2, y0 = Math.max(40, (canvas.height - h) / 2);
+
+      ctx.fillStyle = "rgba(10,10,14,0.72)";
+      ctx.fillRect(x0, y0, w, h);
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0 + 0.5, y0 + 0.5, w - 1, h - 1);
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 16px sans-serif";
+      ctx.fillText("Счёт", x0 + w / 2, y0 + 24);
+      ctx.font = "12px monospace";
+      ctx.fillStyle = "#888";
+      ctx.textAlign = "left";  ctx.fillText("игрок", x0 + 36, y0 + 44);
+      ctx.textAlign = "right"; ctx.fillText("счёт", x0 + w - 14, y0 + 44);
+
+      let y = y0 + padTop;
       for (const p of rows) {
-        const isMe = p.id === wel.playerId; // свой — жирным
-        const text = `${playerName(p)}  ${p.score}`;
-        ctx.font = isMe ? "bold 12px monospace" : "12px monospace";
+        const isMe = p.id === wel.playerId;
+        if (isMe) { // свой — подсветка строки и жирный шрифт
+          ctx.fillStyle = "rgba(255,255,255,0.12)";
+          ctx.fillRect(x0 + 4, y, w - 8, rowH - 2);
+        }
+        const col = PALETTE[playerColor(p)];
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(x0 + 20, y + rowH / 2 - 1, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.font = isMe ? "bold 15px monospace" : "15px monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(`${playerName(p)}${isMe ? " (вы)" : ""}`, x0 + 36, y + 19);
         ctx.textAlign = "right";
-        ctx.fillStyle = PALETTE[playerColor(p)];
-        ctx.fillText(text, x, y);
-        const w = ctx.measureText(text).width;
-        ctx.beginPath(); ctx.arc(x - w - 8, y - 4, 4, 0, Math.PI * 2); ctx.fill();
-        y += 16;
+        ctx.fillText(String(p.score), x0 + w - 14, y + 19);
+        y += rowH;
       }
     }
+
+    // ---- «+1» над своим игроком за свой фраг ----
+    const PLUS_MS = 800, PLUS_RISE = 22;
+    let plusOnes = []; // моменты (performance.now) своих kill
+    function drawPlusOnes(now) {
+      plusOnes = plusOnes.filter(at => now - at < PLUS_MS);
+      if (!plusOnes.length || !myDrawPos) return;
+      upright(myDrawPos.x, myDrawPos.y, 0, () => {
+        ctx.font = "bold 24px sans-serif"; // upright масштабирует ~0.7 → ~16 px на экране
+        ctx.textAlign = "center";
+        ctx.lineWidth = 4;
+        plusOnes.forEach((at, i) => {
+          const t = (now - at) / PLUS_MS;
+          const y = -P_HALF - 18 - PLUS_RISE * (1 - (1 - t) * (1 - t)) - i * 14; // ease-out вверх
+          ctx.globalAlpha = 1 - t * t; // держится, потом быстро гаснет
+          ctx.strokeStyle = "rgba(0,0,0,0.7)";
+          ctx.strokeText("+1", 0, y);
+          ctx.fillStyle = "#ffe27a";
+          ctx.fillText("+1", 0, y);
+        });
+      });
+    }
+    let myDrawPos = null; // где в этом кадре нарисован свой игрок (мир), null — не нарисован
 
     function drawIntermission(round, snap, wel) {
       ctx.fillStyle = "rgba(10,10,14,0.72)";
@@ -393,7 +447,7 @@
 
       // scores приходят только в intermission; на всякий случай — запасной вариант из игроков.
       const rows = (round.scores || (snap.players || []).map(p => ({ id: p.id, score: p.score })))
-        .slice().sort((a, b) => b.score - a.score || a.id - b.id);
+        .slice().sort((a, b) => b.score - a.score || a.id - b.id).slice(0, 10); // топ-10
       const winner = round.winnerId || 0; // 0 — ничья / никто не набрал очков
 
       const cx = canvas.width / 2;
@@ -503,6 +557,7 @@
         const meNow = net.me();
         const list = renderPlayers(now, snap);
         pruneMotion(list);
+        myDrawPos = null;
         for (let p of list) {
           const mine = p.id === wel.playerId;
           // Мёртвых не рисуем. Себя — по последнему снапшоту, без задержки интерполяции:
@@ -515,9 +570,11 @@
           }
           const s = track(p, now);
           upright(p.x, p.y, p.angle, (a) => drawPlayerSprite(p, s, a, now, mine));
+          if (mine) myDrawPos = { x: p.x, y: p.y };
         }
 
         fx.drawWorld(ctx, now); // кольца и частицы поверх спрайтов
+        drawPlusOnes(now);      // «+1» — поверх всех игроков и частиц
       }
 
       // HUD и экранные эффекты — без тряски и масштаба
@@ -535,13 +592,13 @@
       const me = snap && wel ? net.me() : null;
       if (snap && wel && isPlaying(snap)) {
         if (round) drawRoundTimer(round); // у старого сервера раундов нет
-        drawLeaderboard(snap, wel);       // до оверлея смерти — он ложится поверх
         if (me && me.dead) {
           drawDeath(me, now);
         } else {
           if (me) drawAmmo(me, now);
           drawCrosshair(snap, wel, canvas.width / wel.width, canvas.height / wel.height);
         }
+        if (tabHeld) drawScoreOverlay(snap, wel); // последним — поверх экрана смерти тоже
       } else if (round && wel && round.phase === "intermission") {
         drawIntermission(round, snap, wel);
       }
