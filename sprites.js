@@ -240,7 +240,7 @@ export function buildSprites() {
 
 // Рисует персонажа с поворотом. frame — индекс кадра ходьбы.
 // scale — только визуал: спрайт PLAYER_SIZE·scale, центр и поворот те же.
-export const PLAYER_SCALE = 1.4;
+export const PLAYER_SCALE = 1.0; // мир 800×600 рисуется 1:1 — спрайт 32 px при хитбоксе 24
 
 export function drawPlayer(ctx, frames, x, y, angle, frame = 0, scale = PLAYER_SCALE) {
   const img = frames[frame % frames.length];

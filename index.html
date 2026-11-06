@@ -425,12 +425,18 @@
       plusOnes = plusOnes.filter(at => now - at < PLUS_MS);
       if (!plusOnes.length || !myDrawPos) return;
       upright(myDrawPos.x, myDrawPos.y, 0, () => {
-        ctx.font = "bold 24px sans-serif"; // upright масштабирует ~0.7 → ~16 px на экране
+        ctx.font = "bold 16px sans-serif";
         ctx.textAlign = "center";
         ctx.lineWidth = 4;
+        // Верхние спавны у самого края: если над игроком не хватает места
+        // (с запасом на подъём и стопку), «+1» всплывает под ним — вниз.
+        const m = ctx.getTransform(); // upright: m.f — экранный y центра, m.d — масштаб
+        const reach = P_HALF + 18 + PLUS_RISE + 14 * (plusOnes.length - 1) + 16;
+        const dir = m.f - reach * m.d < 0 ? -1 : 1; // 1 — вверх, -1 — вниз
         plusOnes.forEach((at, i) => {
           const t = (now - at) / PLUS_MS;
-          const y = -P_HALF - 18 - PLUS_RISE * (1 - (1 - t) * (1 - t)) - i * 14; // ease-out вверх
+          const off = P_HALF + 18 + PLUS_RISE * (1 - (1 - t) * (1 - t)) + i * 14; // ease-out
+          const y = dir > 0 ? -off : off + 12; // +12 — высота текста, при движении вниз базовая линия ниже
           ctx.globalAlpha = 1 - t * t; // держится, потом быстро гаснет
           ctx.strokeStyle = "rgba(0,0,0,0.7)";
           ctx.strokeText("+1", 0, y);
