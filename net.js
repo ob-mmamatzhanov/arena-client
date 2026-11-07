@@ -18,6 +18,16 @@
     return (local ? "ws://" : "wss://") + param + "/ws";
   })();
 
+  // HTTP-адрес того же сервера: ws(s)://host/ws → http(s)://host/<path>.
+  function httpUrl(path, search) {
+    const u = new URL(WS_URL);
+    u.protocol = u.protocol === "wss:" ? "https:" : "http:";
+    u.pathname = u.pathname.replace(/\/ws\/?$/, "") + path;
+    u.search = search || "";
+    return u.toString();
+  }
+  const LEADERBOARD_URL = httpUrl("/leaderboard", "n=10");
+
   // Значения по умолчанию на случай старого сервера без speed/radius в welcome.
   const DEFAULT_SPEED = 200;  // единиц в секунду
   const DEFAULT_RADIUS = 16;
@@ -29,39 +39,112 @@
 
   const net = {
     connected: false,
-    welcome: null,   // {playerId, tickRate, width, height}
+    welcome: null,   // {playerId, name, color, tickRate, width, height, ...}
     latest: null,    // последний snapshot
-    status: "connecting", // состояние сокета: connecting / connected / disconnected
+    status: "idle",  // состояние сокета: idle (до входа) / connecting / connected / disconnected
   };
   window.net = net;
 
-  // ---- Сокет и реконнект ----
+  // ---- Профиль: имя и постоянный ключ игрока в localStorage ----
+  // localStorage может быть недоступен (приватный режим, file://) — тогда
+  // работаем без сохранения: ключ живёт до перезагрузки страницы.
+  const NAME_KEY = "arena.name", PLAYER_KEY = "arena.playerKey";
+  function storageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+  function storageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* без сохранения */ } }
+
+  let memKey = null;
+  function playerKey() {
+    let k = storageGet(PLAYER_KEY) || memKey;
+    if (!k) {
+      k = crypto.randomUUID ? crypto.randomUUID() : fallbackUUID();
+      storageSet(PLAYER_KEY, k);
+    }
+    return (memKey = k);
+  }
+  // crypto.randomUUID есть только в secure context (https, localhost); по LAN-IP — нет.
+  function fallbackUUID() {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+
+  // Имя: 2–16 символов (кодовых точек, как руны на сервере) после обрезки пробелов.
+  net.NAME_MIN = 2;
+  net.NAME_MAX = 16;
+  net.savedName = () => storageGet(NAME_KEY) || "";
+  net.validName = (raw) => {
+    const n = [...String(raw).trim()].length;
+    return n >= net.NAME_MIN && n <= net.NAME_MAX;
+  };
+
+  // ---- Сокет, join и реконнект ----
+  // Первое сообщение после open — {type:"join", name, playerKey}; без него сервер
+  // через 5 с закрывает соединение и welcome не шлёт.
+  // Первый вход (после «Играть»): если сокет закрылся до welcome или welcome не
+  // пришёл за WELCOME_TIMEOUT_MS после open — вход не удался, net.onJoinFailed.
+  // После первого welcome обрывы лечатся реконнектом, join шлётся снова с теми же данными.
   // Статус отражает только текущий сокет: события старого сокета (его close/error
   // могут прийти уже после открытия нового) игнорируются — иначе статус залипал бы
   // на disconnected при живом соединении.
   const RECONNECT_MIN_MS = 500, RECONNECT_MAX_MS = 5000;
+  const WELCOME_TIMEOUT_MS = 5000;
   let ws = null;
+  let join = null;         // {type, name, playerKey} — что шлём при каждом подключении
+  let joined = false;      // был ли welcome с момента «Играть»
   let reconnectDelay = RECONNECT_MIN_MS;
   let reconnectTimer = 0;
+  let welcomeTimer = 0;
+
+  // Вход: имя уже проверено экраном входа. Сохраняем его и подключаемся.
+  net.start = function (name) {
+    name = String(name).trim();
+    storageSet(NAME_KEY, name);
+    join = { type: "join", name, playerKey: playerKey() };
+    joined = false;
+    reconnectDelay = RECONNECT_MIN_MS;
+    connect();
+  };
+
+  function failJoin(reason) {
+    clearTimeout(welcomeTimer);
+    clearTimeout(reconnectTimer);
+    const sock = ws;
+    ws = null; // дальнейшие события этого сокета игнорируются
+    if (sock) sock.close();
+    net.connected = false;
+    net.status = "idle";
+    if (net.onJoinFailed) net.onJoinFailed(reason);
+  }
 
   function connect() {
     clearTimeout(reconnectTimer);
+    clearTimeout(welcomeTimer);
     const sock = new WebSocket(WS_URL);
     ws = sock;
     net.status = "connecting";
     sock.onopen = () => {
       if (sock !== ws) return;
       net.status = "connected";
-      reconnectDelay = RECONNECT_MIN_MS;
+      sock.send(JSON.stringify(join));
+      if (!joined) {
+        welcomeTimer = setTimeout(() => {
+          if (sock === ws) failJoin("Сервер не ответил за 5 с");
+        }, WELCOME_TIMEOUT_MS);
+      }
     };
     sock.onerror = () => {
       if (sock !== ws) return;
       net.status = "disconnected"; // за error всегда следует close — там и реконнект
     };
-    sock.onclose = () => {
+    sock.onclose = (ev) => {
       if (sock !== ws) return;
       net.connected = false;
       net.status = "disconnected";
+      if (!joined) {
+        failJoin(ev.reason ? `Сервер закрыл соединение: ${ev.reason}` : "Не удалось подключиться к серверу");
+        return;
+      }
       reconnectTimer = setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
     };
@@ -73,11 +156,21 @@
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "welcome") {
+      clearTimeout(welcomeTimer);
+      joined = true;
+      reconnectDelay = RECONNECT_MIN_MS;
+      // Сервер заменяет некорректный ключ своим — сохраняем, что он вернул.
+      if (typeof msg.playerKey === "string" && msg.playerKey && msg.playerKey !== join.playerKey) {
+        join.playerKey = memKey = msg.playerKey;
+        storageSet(PLAYER_KEY, msg.playerKey);
+      }
       // Новое подключение (в том числе после реконнекта): новый playerId,
       // старые предсказания и буфер снапшотов к нему не относятся.
       resetSession();
       net.welcome = {
         playerId: msg.playerId,
+        name: msg.name,
+        color: msg.color,
         tickRate: msg.tickRate,
         width: msg.width,
         height: msg.height,
@@ -167,7 +260,12 @@
   // Нажатие огня (не удержание) — для «сухого щелчка» при пустом магазине.
   function fireAttempt() { if (net.onFireAttempt) net.onFireAttempt(); }
 
+  // Пока фокус в поле ввода (экран входа), клавиши — тексту, а не игре.
+  const typing = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+  net.typing = typing;
+
   window.addEventListener("keydown", (e) => {
+    if (typing(e)) return;
     // Shift — одноразовый запрос рывка: уходит в ближайшем Input, удерживать не нужно.
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       e.preventDefault();
@@ -184,6 +282,7 @@
     }
   });
   window.addEventListener("keyup", (e) => {
+    if (typing(e)) return;
     const k = KEYS[e.code];
     if (!k) return;
     e.preventDefault();
@@ -424,7 +523,7 @@
     const frameDt = lastFrame ? Math.min((now - lastFrame) / 1000, 0.25) : 0;
     lastFrame = now;
 
-    if (!net.connected || !pred.ready || ws.readyState !== WebSocket.OPEN) return;
+    if (!net.connected || !pred.ready || !ws || ws.readyState !== WebSocket.OPEN) return;
 
     // Угол — от отображаемой позиции своего игрока к курсору.
     if (mouse.has) {
@@ -461,5 +560,30 @@
   net.mouse = () => (mouse.has ? { x: mouse.x, y: mouse.y } : null); // в координатах мира
   net.pendingCount = () => pending.length;
 
-  connect(); // в конце: все let/const выше уже инициализированы
+  // ---- Таблица лидеров: GET /leaderboard?n=10 того же сервера, кэш 10 с ----
+  // net.leaderboard() не ждёт сети: отдаёт то, что есть, и при устаревшем кэше
+  // запускает фоновый запрос. state: "loading" (ещё не было ответа) / "ok" / "error".
+  const LEADERBOARD_TTL_MS = 10000, LEADERBOARD_TIMEOUT_MS = 4000;
+  const lb = { state: "loading", rows: [], at: -Infinity, inFlight: false };
+  function fetchLeaderboard() {
+    lb.inFlight = true;
+    lb.at = performance.now(); // и при ошибке: следующая попытка — через TTL, не каждый кадр
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), LEADERBOARD_TIMEOUT_MS);
+    fetch(LEADERBOARD_URL, { signal: ctl.signal, cache: "no-store" })
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(data => {
+        if (!Array.isArray(data)) throw new Error("bad leaderboard");
+        lb.rows = data
+          .filter(e => e && typeof e.score === "number")
+          .map(e => ({ name: typeof e.name === "string" && e.name ? e.name : "—", score: e.score }));
+        lb.state = "ok";
+      })
+      .catch(() => { lb.state = "error"; })
+      .finally(() => { clearTimeout(t); lb.inFlight = false; lb.at = performance.now(); });
+  }
+  net.leaderboard = function () {
+    if (!lb.inFlight && performance.now() - lb.at >= LEADERBOARD_TTL_MS) fetchLeaderboard();
+    return lb;
+  };
 })();

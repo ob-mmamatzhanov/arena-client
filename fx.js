@@ -106,7 +106,8 @@
   window.addEventListener("pointerdown", ensureAudio);
   window.addEventListener("keydown", (e) => {
     ensureAudio();
-    if (e.code === "KeyM" && !e.repeat) {
+    // В поле ввода (экран входа) «м» — буква имени, а не звук.
+    if (e.code === "KeyM" && !e.repeat && !(e.target instanceof HTMLInputElement)) {
       muted = !muted;
       if (master) master.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.01);
     }

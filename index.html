@@ -6,11 +6,40 @@
   <style>
     body { margin: 0; background: #111; color: #ccc; font: 14px sans-serif;
            display: flex; flex-direction: column; align-items: center; }
-    canvas { background: #1e1e24; margin-top: 16px; cursor: none; } /* прицел рисуем сами */
+    canvas { display: block; background: #1e1e24; cursor: none; } /* прицел рисуем сами */
+    #stage { position: relative; margin-top: 16px; }
+    /* Экран входа — поверх холста, пока игрок не вошёл. */
+    #login { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             background: rgba(10,10,14,0.78); cursor: default; }
+    #login[hidden] { display: none; }
+    #login form { width: 280px; padding: 24px; background: #1b1b22; border: 1px solid #333;
+                  border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+    #login h1 { margin: 0 0 8px; font-size: 22px; color: #fff; text-align: center; }
+    #login label { color: #bbb; }
+    #login input { font: 16px sans-serif; padding: 8px 10px; border-radius: 4px; border: 1px solid #444;
+                   background: #111; color: #eee; outline: none; }
+    #login input:focus { border-color: #5c6bc0; }
+    #login .hint { font-size: 12px; color: #888; }
+    #login .error { font-size: 13px; color: #ff6b6b; min-height: 1.2em; }
+    #login button { font: bold 16px sans-serif; padding: 9px; border: 0; border-radius: 4px;
+                    background: #5c6bc0; color: #fff; cursor: pointer; }
+    #login button:disabled { background: #3a3f63; color: #999; cursor: wait; }
   </style>
 </head>
 <body>
-  <canvas id="game" width="800" height="600"></canvas>
+  <div id="stage">
+    <canvas id="game" width="800" height="600"></canvas>
+    <div id="login">
+      <form id="login-form" novalidate>
+        <h1>Arena</h1>
+        <label for="login-name">Имя</label>
+        <input id="login-name" maxlength="16" autocomplete="nickname" spellcheck="false">
+        <div class="hint">От 2 до 16 символов</div>
+        <div class="error" id="login-error" role="alert"></div>
+        <button id="login-play" type="submit">Играть</button>
+      </form>
+    </div>
+  </div>
   <p>WASD / стрелки — движение, мышь — прицел, ЛКМ / пробел — огонь, Shift — рывок, I — интерполяция, M — звук</p>
 
   <script src="fx.js"></script>
@@ -27,6 +56,44 @@
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
     net.attachCanvas(canvas);
+
+    // ---- Экран входа ----
+    // Сокет открывается только по «Играть» (или Enter — это submit формы).
+    // При неудаче входа (сокет закрыт до welcome или welcome не пришёл за 5 с)
+    // net.onJoinFailed возвращает сюда с текстом ошибки.
+    const loginEl = document.getElementById("login");
+    const loginForm = document.getElementById("login-form");
+    const nameInput = document.getElementById("login-name");
+    const loginError = document.getElementById("login-error");
+    const playBtn = document.getElementById("login-play");
+    nameInput.value = net.savedName();
+
+    function showLogin(error) {
+      loginEl.hidden = false;
+      loginError.textContent = error || "";
+      playBtn.disabled = false;
+      playBtn.textContent = "Играть";
+      nameInput.disabled = false;
+      nameInput.focus();
+      nameInput.select();
+    }
+    loginForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (!net.validName(nameInput.value)) {
+        loginError.textContent = `Имя — от ${net.NAME_MIN} до ${net.NAME_MAX} символов`;
+        nameInput.focus();
+        return;
+      }
+      loginError.textContent = "";
+      playBtn.disabled = true;
+      playBtn.textContent = "Подключение…";
+      nameInput.disabled = true;
+      net.start(nameInput.value);
+    });
+    nameInput.addEventListener("input", () => { loginError.textContent = ""; });
+    net.onJoinFailed = (reason) => showLogin(reason);
+    // Экран входа прячем по welcome — в draw(), когда net.welcome появился.
+    showLogin();
 
     let worldSx = 1, worldSy = 1; // масштаб мир → холст, обновляется в draw
 
@@ -136,7 +203,7 @@
     let interpOk = false;      // нашлась ли пара снапшотов вокруг renderTime в этом кадре
 
     window.addEventListener("keydown", (e) => {
-      if (e.code === "KeyI" && !e.repeat) interpOn = !interpOn;
+      if (e.code === "KeyI" && !e.repeat && !net.typing(e)) interpOn = !interpOn;
     });
 
     const lerp = (a, b, t) => a + (b - a) * t;
@@ -272,14 +339,16 @@
       ctx.restore();
     }
 
-    // В протоколе пока нет color — пока сервер его не шлёт, цвет выводим из id.
-    const playerColor = (p) => (typeof p.color === "number" ? p.color : p.id) % PALETTE.length;
-    // Цвет по id — для табло, лидерборда и частиц, где под рукой только id.
+    // Цвет и имя — только из снапшота: color — индекс в PALETTE, назначает сервер.
+    const NO_COLOR = "#9e9e9e"; // игрока уже нет в снапшоте (вышел) или color некорректен
+    const playerColor = (p) => (Number.isInteger(p.color) && p.color >= 0 && p.color < PALETTE.length ? p.color : 0);
+    const paletteColor = (p) => (Number.isInteger(p.color) && PALETTE[p.color]) || NO_COLOR;
+    // Цвет по id — для round.scores и частиц, где под рукой только id: ищем игрока в снапшоте.
     function colorOfId(id) {
       const p = net.latest && (net.latest.players || []).find(q => q.id === id);
-      return PALETTE[playerColor(p || { id })];
+      return p ? paletteColor(p) : NO_COLOR;
     }
-    const playerName = (p) => p.name || `Игрок ${p.id}`; // имени в протоколе пока нет
+    const playerName = (p) => p.name || "";
 
     // hp-полоска под игроком (24×3 при масштабе 1, растёт вместе со спрайтом),
     // от зелёного (100) к красному (0); при полном hp не рисуем.
@@ -343,7 +412,7 @@
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(0,0,0,0.7)";
       ctx.strokeText(playerName(p), 0, -P_HALF - 4);
-      ctx.fillStyle = PALETTE[playerColor(p)];
+      ctx.fillStyle = paletteColor(p);
       ctx.fillText(playerName(p), 0, -P_HALF - 4);
       if (p.hp != null) drawHpBar(p.hp); // hp = 0 — валидное значение
     }
@@ -390,11 +459,13 @@
       ctx.fillText(fmtTime(round.timeLeft), canvas.width - 10, 22);
     }
 
-    // ---- Табло по удержанию Tab (во время раунда) ----
-    // preventDefault и на keydown, и на keyup: иначе Tab уводит фокус с холста.
+    // ---- Табло по удержанию Tab ----
+    // В раунде — счёт игроков, в intermission — таблица лидеров.
+    // preventDefault и на keydown, и на keyup: иначе Tab уводит фокус с холста
+    // (кроме экрана входа — там Tab переключает поле и кнопку).
     let tabHeld = false;
-    window.addEventListener("keydown", (e) => { if (e.code === "Tab") { e.preventDefault(); tabHeld = true; } });
-    window.addEventListener("keyup", (e) => { if (e.code === "Tab") { e.preventDefault(); tabHeld = false; } });
+    window.addEventListener("keydown", (e) => { if (e.code === "Tab" && loginEl.hidden) { e.preventDefault(); tabHeld = true; } });
+    window.addEventListener("keyup", (e) => { if (e.code === "Tab") { if (loginEl.hidden) e.preventDefault(); tabHeld = false; } });
     window.addEventListener("blur", () => { tabHeld = false; }); // отпустили Tab вне окна
 
     function drawScoreOverlay(snap, wel) {
@@ -425,7 +496,7 @@
           ctx.fillStyle = "rgba(255,255,255,0.12)";
           ctx.fillRect(x0 + 4, y, w - 8, rowH - 2);
         }
-        const col = PALETTE[playerColor(p)];
+        const col = paletteColor(p);
         ctx.fillStyle = col;
         ctx.beginPath(); ctx.arc(x0 + 20, y + rowH / 2 - 1, 5, 0, Math.PI * 2); ctx.fill();
         ctx.font = isMe ? "bold 15px monospace" : "15px monospace";
@@ -466,28 +537,44 @@
     }
     let myDrawPos = null; // где в этом кадре нарисован свой игрок (мир), null — не нарисован
 
+    // Ячейка имени: обрезаем по ширине, чтобы не налезть на счёт.
+    function fitText(text, maxW) {
+      if (ctx.measureText(text).width <= maxW) return text;
+      let t = text;
+      while (t.length > 1 && ctx.measureText(t + "…").width > maxW) t = t.slice(0, -1);
+      return t + "…";
+    }
+
+    // Межраундовый экран: слева итоги раунда (round.scores, имена в цветах игроков),
+    // справа — таблица лидеров за всё время с сервера.
     function drawIntermission(round, snap, wel) {
       ctx.fillStyle = "rgba(10,10,14,0.72)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // scores приходят только в intermission; на всякий случай — запасной вариант из игроков.
-      const rows = (round.scores || (snap.players || []).map(p => ({ id: p.id, score: p.score })))
-        .slice().sort((a, b) => b.score - a.score || a.id - b.id).slice(0, 10); // топ-10
+      const rows = (round.scores || snap.players || [])
+        .map(r => ({ id: r.id, name: r.name, score: r.score }))
+        .sort((a, b) => b.score - a.score || a.id - b.id).slice(0, 10); // топ-10
       const winner = round.winnerId || 0; // 0 — ничья / никто не набрал очков
+      const winnerRow = (round.scores || []).find(r => r.id === winner);
 
       const cx = canvas.width / 2;
       ctx.textAlign = "center";
       ctx.fillStyle = "#fff";
       ctx.font = "bold 28px sans-serif";
-      ctx.fillText("Раунд окончен", cx, 110);
+      ctx.fillText("Раунд окончен", cx, 80);
       ctx.font = "18px sans-serif";
       ctx.fillStyle = winner ? colorOfId(winner) : "#bbb";
-      ctx.fillText(winner ? `Победитель: игрок ${winner}${winner === wel.playerId ? " (вы)" : ""}` : "Ничья", cx, 142);
+      const winnerName = winnerRow && winnerRow.name ? winnerRow.name : "—";
+      ctx.fillText(winner ? `Победитель: ${winnerName}${winner === wel.playerId ? " (вы)" : ""}` : "Ничья", cx, 112);
 
-      const rowH = 30, w = 280, x0 = cx - w / 2;
-      let y = 180;
-      ctx.font = "14px monospace";
-      ctx.fillStyle = "#888";
+      const rowH = 30, w = 340, top = 172;
+      // Итоги раунда
+      const x0 = 30;
+      let y = top;
+      ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#ddd"; ctx.textAlign = "left";
+      ctx.fillText("Раунд", x0, y - 24);
+      ctx.font = "14px monospace"; ctx.fillStyle = "#888";
       ctx.textAlign = "left";  ctx.fillText("#  игрок", x0 + 12, y);
       ctx.textAlign = "right"; ctx.fillText("счёт", x0 + w - 12, y);
       y += 12;
@@ -496,21 +583,76 @@
         ctx.fillStyle = isWinner ? "rgba(255,213,74,0.25)" : i % 2 ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)";
         ctx.fillRect(x0, y, w, rowH);
         if (isWinner) { ctx.strokeStyle = "#ffd54a"; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y + 1, w - 2, rowH - 2); }
-        ctx.font = isWinner ? "bold 16px monospace" : "16px monospace";
+        ctx.font = isWinner || isMe ? "bold 16px monospace" : "16px monospace";
         ctx.fillStyle = colorOfId(r.id); // цвет игрока, как у его спрайта
         ctx.beginPath(); ctx.arc(x0 + 44, y + rowH / 2, 5, 0, Math.PI * 2); ctx.fill();
         ctx.textAlign = "left";
         ctx.fillText(`${i + 1}`, x0 + 12, y + 21);
-        ctx.fillText(`${r.id}${isMe ? " (вы)" : ""}${isWinner ? "  ★" : ""}`, x0 + 56, y + 21);
+        const suffix = `${isMe ? " (вы)" : ""}${isWinner ? " ★" : ""}`;
+        ctx.fillText(fitText(r.name || "—", w - 56 - 50 - ctx.measureText(suffix).width) + suffix, x0 + 56, y + 21);
         ctx.textAlign = "right";
         ctx.fillText(String(r.score), x0 + w - 12, y + 21);
         y += rowH;
       });
+      const roundBottom = y;
+
+      // Лидеры за всё время
+      const lbBottom = drawLeaderboardTable(canvas.width - 30 - w, top, w);
 
       ctx.textAlign = "center";
       ctx.font = "16px sans-serif";
       ctx.fillStyle = "#ccc";
-      ctx.fillText(`Следующий раунд через ${Math.max(0, Math.ceil(round.timeLeft))} с`, cx, y + 40);
+      ctx.fillText(`Следующий раунд через ${Math.max(0, Math.ceil(round.timeLeft))} с`, cx,
+        Math.min(canvas.height - 24, Math.max(roundBottom, lbBottom) + 40));
+    }
+
+    // Таблица лидеров (net.leaderboard: GET /leaderboard?n=10, кэш 10 с).
+    // Цвета нет: в таблице и те, кто сейчас не в игре. Возвращает нижнюю границу.
+    function drawLeaderboardTable(x0, y, w) {
+      const lb = net.leaderboard();
+      const rowH = 30;
+      ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#ddd"; ctx.textAlign = "left";
+      ctx.fillText("Лучшие за всё время", x0, y - 24);
+      ctx.font = "14px monospace"; ctx.fillStyle = "#888";
+      ctx.textAlign = "left";  ctx.fillText("#  игрок", x0 + 12, y);
+      ctx.textAlign = "right"; ctx.fillText("очки", x0 + w - 12, y);
+      y += 12;
+      if (lb.state !== "ok" || !lb.rows.length) {
+        ctx.fillStyle = "rgba(255,255,255,0.06)";
+        ctx.fillRect(x0, y, w, rowH);
+        ctx.font = "15px sans-serif"; ctx.textAlign = "center";
+        ctx.fillStyle = lb.state === "error" ? "#ff8a80" : "#999";
+        ctx.fillText(lb.state === "error" ? "Таблица лидеров недоступна" : lb.state === "loading" ? "Загрузка…" : "Пока пусто",
+          x0 + w / 2, y + 20);
+        return y + rowH;
+      }
+      lb.rows.slice(0, 10).forEach((r, i) => {
+        ctx.fillStyle = i % 2 ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)";
+        ctx.fillRect(x0, y, w, rowH);
+        ctx.font = "16px monospace";
+        ctx.fillStyle = "#e8e8e8";
+        ctx.textAlign = "left";
+        ctx.fillText(`${i + 1}`, x0 + 12, y + 21);
+        ctx.fillText(fitText(r.name, w - 44 - 70), x0 + 44, y + 21);
+        ctx.textAlign = "right";
+        ctx.fillText(String(r.score), x0 + w - 12, y + 21);
+        y += rowH;
+      });
+      return y;
+    }
+
+    // Tab в intermission — таблица лидеров крупно, поверх межраундового экрана.
+    function drawLeaderboardOverlay() {
+      const lb = net.leaderboard();
+      const n = lb.state === "ok" ? Math.max(1, Math.min(10, lb.rows.length)) : 1;
+      const w = 380, x0 = (canvas.width - w) / 2, h = 64 + 12 + n * 30 + 24;
+      const y0 = Math.max(20, (canvas.height - h) / 2);
+      ctx.fillStyle = "rgba(10,10,14,0.94)";
+      ctx.fillRect(x0 - 20, y0, w + 40, h);
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0 - 19.5, y0 + 0.5, w + 39, h - 1);
+      drawLeaderboardTable(x0, y0 + 64, w);
     }
 
     // ---- Патроны и смерть ----
@@ -561,6 +703,7 @@
 
       const snap = net.latest;
       const wel = net.welcome;
+      if (wel && !loginEl.hidden) loginEl.hidden = true; // вошли — пришёл welcome
 
       // Тряска: сдвиг камеры (в экранных px) — для пола и мира.
       const sh = wel ? fx.shakeOffset(now) : { x: 0, y: 0 };
@@ -626,6 +769,7 @@
         if (tabHeld) drawScoreOverlay(snap, wel); // последним — поверх экрана смерти тоже
       } else if (round && wel && round.phase === "intermission") {
         drawIntermission(round, snap, wel);
+        if (tabHeld) drawLeaderboardOverlay();
       }
 
       requestAnimationFrame(draw);
