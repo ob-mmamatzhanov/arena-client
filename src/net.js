@@ -315,9 +315,26 @@ export function connect(canvas, opts, callbacks = {}) {
   };
 
   const input = { up: false, down: false, left: false, right: false, fire: false, angle: 0 };
-  // Нажатие огня запоминается до ближайшего тика: клик короче 50 мс иначе не дошёл бы до сервера.
-  let fireLatched = false;
+  // Время нажатия огня (performance.now). После паузы в кадрах update догоняет
+  // несколько тиков сразу, и каждый описывает своё прошедшее время: огонь в таком
+  // тике есть, только если кнопка уже была нажата к его моменту (см. clientTick).
+  // Иначе короткий клик, пришедшийся на кадр после паузы, уходил бы в 3–8 Input
+  // с fire и давал два выстрела.
+  let fireDownAt = Infinity;  // кнопка огня зажата с этого момента; Infinity — отпущена
+  // Нажатие запоминается до первого тика не раньше него: клик короче 50 мс иначе
+  // не дошёл бы до сервера. Infinity — нет непереданного нажатия.
+  let fireLatchedAt = Infinity;
   let dashLatched = false;
+  function pressFire() {
+    const now = performance.now();
+    if (!input.fire) fireDownAt = now; // повтор клавиши — не новое нажатие
+    input.fire = true;
+    fireLatchedAt = Math.min(fireLatchedAt, now);
+  }
+  function releaseFire() {
+    input.fire = false;
+    fireDownAt = Infinity;
+  }
   const mouse = { x: 0, y: 0, has: false };
   let seq = 0;
 
@@ -327,7 +344,7 @@ export function connect(canvas, opts, callbacks = {}) {
   const FIRE_COOLDOWN_MS = 200; // game.DefaultConfig().FireCooldown
   const FIRE_QUEUE_SLACK_MS = 100;
   let lastShotAt = -Infinity;   // когда пришло событие своего выстрела
-  let fireQueuedUntil = 0;
+  let fireQueuedFrom = Infinity, fireQueuedUntil = 0; // окно очереди [from, until)
   function onOwnShot(at) {
     lastShotAt = at;
     fireQueuedUntil = 0; // выстрел из очереди состоялся
@@ -336,7 +353,10 @@ export function connect(canvas, opts, callbacks = {}) {
   // Нажатие огня (не удержание) — для «сухого щелчка» при пустом магазине.
   function fireAttempt() {
     const now = performance.now();
-    if (now - lastShotAt < FIRE_COOLDOWN_MS) fireQueuedUntil = lastShotAt + FIRE_COOLDOWN_MS + FIRE_QUEUE_SLACK_MS;
+    if (now - lastShotAt < FIRE_COOLDOWN_MS) {
+      fireQueuedFrom = now;
+      fireQueuedUntil = lastShotAt + FIRE_COOLDOWN_MS + FIRE_QUEUE_SLACK_MS;
+    }
     if (net.onFireAttempt) net.onFireAttempt();
   }
 
@@ -355,22 +375,25 @@ export function connect(canvas, opts, callbacks = {}) {
     const k = KEYS[e.code];
     if (!k) return;
     e.preventDefault();
-    input[k] = true;
     if (k === "fire") {
-      fireLatched = true;
+      pressFire();
       if (!e.repeat) fireAttempt();
+      return;
     }
+    input[k] = true;
   });
   on(window, "keyup", (e) => {
     if (typing(e)) return;
     const k = KEYS[e.code];
     if (!k) return;
     e.preventDefault();
-    input[k] = false;
+    if (k === "fire") releaseFire();
+    else input[k] = false;
   });
   // Сбрасываем клавиши при потере фокуса и уходе со вкладки, чтобы игрок не "залип".
   const releaseKeys = () => {
-    input.up = input.down = input.left = input.right = input.fire = false;
+    input.up = input.down = input.left = input.right = false;
+    releaseFire();
     fireQueuedUntil = 0;
   };
   on(window, "blur", releaseKeys);
@@ -385,9 +408,9 @@ export function connect(canvas, opts, callbacks = {}) {
     mouse.has = true;
   });
   on(canvas, "mousedown", (e) => {
-    if (e.button === 0) { input.fire = true; fireLatched = true; fireAttempt(); }
+    if (e.button === 0) { pressFire(); fireAttempt(); }
   });
-  on(window, "mouseup", (e) => { if (e.button === 0) input.fire = false; });
+  on(window, "mouseup", (e) => { if (e.button === 0) releaseFire(); });
 
   // ---- Симуляция (зеркало game.World.Update на сервере) ----
   function moveVector(i) {
@@ -508,6 +531,7 @@ export function connect(canvas, opts, callbacks = {}) {
     boostFactor = 1;
     lastShotAt = -Infinity;
     fireQueuedUntil = 0;
+    fireLatchedAt = Infinity; // клик до переподключения не стреляет в новой сессии
   }
 
   function serverMe(snap) {
@@ -573,18 +597,21 @@ export function connect(canvas, opts, callbacks = {}) {
   }
 
   // Один клиентский тик: формируем команду, шлём, сразу применяем локально.
-  function clientTick(dt) {
+  // at — момент, который описывает тик (performance.now); при догоне после паузы
+  // в кадрах у тиков пачки он в прошлом — огонь берётся на этот момент, а не на «сейчас».
+  function clientTick(dt, at) {
     const m = moveVector(input);
+    const latched = at >= fireLatchedAt;
     const msg = {
       seq: ++seq,
       moveX: m.x, moveY: m.y,
       angle: input.angle,
-      fire: input.fire || fireLatched || performance.now() < fireQueuedUntil,
+      fire: at >= fireDownAt || latched || (at >= fireQueuedFrom && at < fireQueuedUntil),
       dash: dashLatched, // одноразово: true только в одном Input после нажатия Shift
       // Эти булевы поля сервер игнорирует; оставлены для совместимости/отладки.
       up: input.up, down: input.down, left: input.left, right: input.right,
     };
-    fireLatched = false;
+    if (latched) fireLatchedAt = Infinity;
     dashLatched = false;
     ws.send(JSON.stringify(msg)); // шлём и в intermission — это ещё и heartbeat
 
@@ -629,10 +656,14 @@ export function connect(canvas, opts, callbacks = {}) {
 
     const dt = 1 / net.welcome.tickRate;
     acc += frameDt;
-    while (acc >= dt) {
-      clientTick(dt);
+    // Тики пачки идут подряд и заканчиваются на «сейчас»: i-й из n описывает
+    // момент now − (n−1−i)·dt.
+    const n = Math.floor(acc / dt + TIME_EPS);
+    for (let i = 0; i < n; i++) {
+      clientTick(dt, now - (n - 1 - i) * dt * 1000);
       acc -= dt;
     }
+    acc = Math.max(acc, 0);
 
     const k = Math.pow(ERROR_DECAY_PER_SEC, frameDt);
     pred.err.x *= k;
