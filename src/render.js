@@ -183,16 +183,17 @@ export function createRenderer(canvas, net, on) {
 
   // ---- Препятствия ----
   // Вид препятствия — поле kind из welcome: "crate" — ящик, остальное (и пустое) — стена.
+  // Сломанный ящик (hp 0, см. net.js applyCrates) не рисуется; у повреждённого — трещины.
   function drawObstacles(wel) {
-    for (const o of wel.obstacles) {
-      if (o.kind === "crate") drawCrate(o);
-      else drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
-    }
+    wel.obstacles.forEach((o, i) => {
+      if (o.kind !== "crate") drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
+      else if (net.solid(o)) drawCrate(o, i, wel.crateHits);
+    });
   }
 
   // Ящик — тайлами CRATE_TILE целиком, без паттерна, плюс тёмная кромка 1 px.
   // Ящики кратны 32; если нет — крайний тайл обрезается (не растягивается).
-  function drawCrate(o) {
+  function drawCrate(o, i, full) {
     const k = S.crate.width / CRATE_TILE; // тайл нарисован в 2×
     for (let ty = 0; ty < o.h; ty += CRATE_TILE) {
       for (let tx = 0; tx < o.w; tx += CRATE_TILE) {
@@ -200,9 +201,62 @@ export function createRenderer(canvas, net, on) {
         ctx.drawImage(S.crate, 0, 0, w * k, h * k, o.x + tx, o.y + ty, w, h);
       }
     }
+    const damage = full > 0 && typeof o.hp === "number" ? full - o.hp : 0;
+    if (damage > 0) drawCrateDamage(o, i, damage, full);
     ctx.strokeStyle = "rgba(0,0,0,0.7)";
     ctx.lineWidth = 1;
     ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1); // +0.5 — линия ровно в 1 px, без размытия
+  }
+
+  // Трещины: по одной на каждое попадание, форма постоянна для ящика (сид — его
+  // индекс), поэтому при каждом кадре не «пляшет». Плюс ящик темнеет.
+  const crackCache = new Map(); // индекс ящика → [[{x, y}, …], …] в долях ширины/высоты
+  function cracksOf(i, n) {
+    let list = crackCache.get(i);
+    if (!list || list.length < n) {
+      let a = Math.imul(i + 1, 0x9e3779b1) >>> 0; // mulberry32: детерминированно по индексу
+      const rnd = () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+      list = [];
+      for (let c = 0; c < n; c++) {
+        // Старт у случайной грани (чуть внутри — линия с круглым концом не вылезает
+        // за кромку), дальше 3 излома внутрь ящика.
+        const side = Math.floor(rnd() * 4), t = 0.2 + rnd() * 0.6;
+        let p = [{ x: t, y: 0.04 }, { x: 0.96, y: t }, { x: t, y: 0.96 }, { x: 0.04, y: t }][side];
+        const pts = [p];
+        const dir = [[0, 1], [-1, 0], [0, -1], [1, 0]][side];
+        for (let s = 0; s < 3; s++) {
+          p = {
+            x: Math.min(0.95, Math.max(0.05, p.x + dir[0] * (0.12 + rnd() * 0.15) + (rnd() - 0.5) * 0.25)),
+            y: Math.min(0.95, Math.max(0.05, p.y + dir[1] * (0.12 + rnd() * 0.15) + (rnd() - 0.5) * 0.25)),
+          };
+          pts.push(p);
+        }
+        list.push(pts);
+      }
+      crackCache.set(i, list);
+    }
+    return list.slice(0, n);
+  }
+  function drawCrateDamage(o, i, damage, full) {
+    ctx.fillStyle = `rgba(20,10,0,${(0.35 * damage) / full})`;
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const pts of cracksOf(i, damage)) {
+      ctx.beginPath();
+      pts.forEach((q, j) => (j ? ctx.lineTo : ctx.moveTo).call(ctx, o.x + q.x * o.w, o.y + q.y * o.h));
+      ctx.strokeStyle = "rgba(25,12,4,0.9)";
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(255,220,170,0.35)"; // светлый скол вдоль трещины
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    }
   }
 
   // ---- Пол ----
