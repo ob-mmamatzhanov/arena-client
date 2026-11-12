@@ -8,6 +8,9 @@
   "build": {
     "command": "npm ci && npm run build"
   },
+  // Превью для веток и PR (Workers Builds запускает для них `npx wrangler preview`):
+  // блок обязателен, даже пустой; ассеты и прочее наследуются с верхнего уровня.
+  "previews": {},
   "assets": {
     "directory": "./dist",
     // Любой путь — index.html: ссылки вида /?join=ABCD и обновление страницы не дают 404.
