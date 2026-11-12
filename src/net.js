@@ -228,16 +228,21 @@ export function connect(canvas, opts, callbacks = {}) {
         height: msg.height,
         speed: typeof msg.speed === "number" ? msg.speed : DEFAULT_SPEED,
         radius: typeof msg.radius === "number" ? msg.radius : DEFAULT_RADIUS,
-        obstacles: Array.isArray(msg.obstacles) ? msg.obstacles : [],
+        // Копии: прочность ящиков (hp) меняется по снапшотам, см. applyCrates.
+        obstacles: Array.isArray(msg.obstacles) ? msg.obstacles.map((o) => ({ ...o })) : [],
+        // Сколько попаданий выдерживает ящик; 0 — ящики неразрушимы (и старый сервер без поля).
+        crateHits: typeof msg.crateHits === "number" ? msg.crateHits : 0,
         room: typeof msg.room === "string" ? msg.room : "",
         mode: typeof msg.mode === "string" ? msg.mode : "",
       };
+      applyCrates(undefined);
       net.connected = true;
       emit("onJoin", { room: net.welcome.room, mode: net.welcome.mode });
     } else if (msg.type === "snapshot") {
       net.latest = msg;
       net.latestAt = performance.now();
       pushSnapshot(msg, net.latestAt);
+      applyCrates(msg.crates); // до reconcile: переигровка ввода должна видеть сломанные ящики
       reconcile(msg);
       // Попадания есть только в снапшоте своего тика — отдаём каждый снапшот,
       // а не только последний к кадру, чтобы события не терялись.
@@ -435,9 +440,22 @@ export function connect(canvas, opts, callbacks = {}) {
     return DASH_SPEED * (left * left - next * next) / (2 * DASH_DURATION);
   }
 
+  // ---- Разрушаемые ящики ----
+  // snapshot.crates — только повреждённые/сломанные ящики {i, hp}; всё, чего нет
+  // в списке, целое (так ящики и «чинятся» в новом раунде). hp пишется прямо в
+  // welcome.obstacles[i]: его читают и предсказание движения, и отрисовка.
+  function applyCrates(crates) {
+    const obs = net.welcome.obstacles, full = net.welcome.crateHits;
+    for (const o of obs) if (o.kind === "crate") o.hp = full;
+    for (const c of crates || []) if (obs[c.i] && obs[c.i].kind === "crate") obs[c.i].hp = c.hp;
+  }
+  const solid = (o) => !(o.kind === "crate" && o.hp === 0); // сломанного ящика нет для коллизий
+  net.solid = solid;
+
   // Зеркало game.World.move: края мира и препятствия, оси раздельно — сначала X,
   // затем Y с уже новым X (упёршись в стену, игрок скользит вдоль неё).
   // Во время рывка обычное управление не действует: смещение — cmd.dashMove.
+  // Сломанные ящики пропускаются, как в game.World.move.
   function step(pos, cmd, dt) {
     const w = net.welcome;
     const r = w.radius;
@@ -447,12 +465,12 @@ export function connect(canvas, opts, callbacks = {}) {
     const dy = cmd.dashMove ? cmd.dashMove.y : cmd.moveY * v * dt;
     if (dx !== 0) {
       let x = clamp(pos.x + dx, rx, w.width - rx);
-      for (const o of w.obstacles) x = sweepAxis(pos.x, x, pos.y, o.x, o.x + o.w, o.y, o.y + o.h, r);
+      for (const o of w.obstacles) if (solid(o)) x = sweepAxis(pos.x, x, pos.y, o.x, o.x + o.w, o.y, o.y + o.h, r);
       pos.x = x;
     }
     if (dy !== 0) {
       let y = clamp(pos.y + dy, ry, w.height - ry);
-      for (const o of w.obstacles) y = sweepAxis(pos.y, y, pos.x, o.y, o.y + o.h, o.x, o.x + o.w, r);
+      for (const o of w.obstacles) if (solid(o)) y = sweepAxis(pos.y, y, pos.x, o.y, o.y + o.h, o.x, o.x + o.w, r);
       pos.y = y;
     }
   }

@@ -187,6 +187,30 @@ export const fx = (function () {
     osc.stop(t + 0.015);
   }
 
+  // Дерево: шум через lowpass (глухо, без металлического звона) + низкий тон
+  // корпуса. Попадание — короткий «тук», поломка — длиннее и ниже, с треском.
+  function playWood(broken) {
+    if (!canPlay()) return;
+    const t = audio.currentTime, dur = broken ? 0.06 : 0.04;
+    for (let k = 0; k < (broken ? 3 : 1); k++) { // поломка — три щелчка подряд, треск
+      const at = t + k * 0.035;
+      const src = audio.createBufferSource();
+      src.buffer = noiseBuf;
+      const lp = audio.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = broken ? 900 : 650;
+      const g = audio.createGain();
+      g.gain.setValueAtTime(broken ? 0.55 : 0.4, at);
+      g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+      src.connect(lp).connect(g).connect(master);
+      src.start(at);
+      src.stop(at + dur);
+    }
+    tone(broken ? 95 : 150, t, broken ? 0.18 : 0.07, broken ? 0.5 : 0.3);
+  }
+
+  const WOOD = ["#a8743f", "#c8935a", "#7a4f26", "#e0b47c"];
+
   // ---------------- События снапшота ----------------
   // ctx: {myId, radius, players: Map id → {x, y, angle}} — состояние на момент события.
   // now — performance.now() получения снапшота (та же шкала, что у кадров).
@@ -240,6 +264,17 @@ export const fx = (function () {
           break;
         case "respawn":
           rings.push({ x: e.x, y: e.y, r: c.radius, at: now });
+          break;
+        case "crateHit": // пуля погасла о ящик: щепки из точки попадания
+          burst(e.x, e.y, 5 + ((Math.random() * 3) | 0), {
+            speed: [60, 200], life: [0.25, 0.5], size: [1.2, 2.4], colors: WOOD,
+          });
+          if (e.hp > 0) playWood(false); // ломающему попаданию звук даст crateBroken
+          break;
+        case "crateBroken": // ящик разлетелся: крупные обломки из центра
+          burst(e.x, e.y, 26, { speed: [80, 320], life: [0.5, 1.0], size: [2, 4.5], colors: WOOD });
+          burst(e.x, e.y, 10, { speed: [20, 90], life: [0.6, 1.2], size: [1, 2], colors: ["#5a3a1c", "#3d2812"] }); // пыль
+          playWood(true);
           break;
       }
     }
