@@ -1,0 +1,19 @@
+// Деплой на Cloudflare Workers (Workers Builds запускает `npx wrangler deploy`).
+// Клиент — статика после Vite: wrangler сам собирает её перед деплоем (build.command)
+// и раздаёт dist/ как ассеты, без кода воркера.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "arena-client",
+  "compatibility_date": "2026-11-01",
+  "build": {
+    "command": "npm ci && npm run build"
+  },
+  // Превью для веток и PR (Workers Builds запускает для них `npx wrangler preview`):
+  // блок обязателен, даже пустой; ассеты и прочее наследуются с верхнего уровня.
+  "previews": {},
+  "assets": {
+    "directory": "./dist",
+    // Любой путь — index.html: ссылки вида /?join=ABCD и обновление страницы не дают 404.
+    "not_found_handling": "single-page-application"
+  }
+}

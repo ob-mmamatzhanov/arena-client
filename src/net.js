@@ -1,32 +1,87 @@
 // Сетевой слой, ввод и client-side prediction своего игрока.
-(function () {
-  // Адрес сервера по умолчанию зависит от того, откуда открыт клиент:
-  // локально (localhost, 127.0.0.1, ::1, file://) — локальный бэкенд ws://localhost:8080/ws,
-  // иначе (прод) — стенд wss://arena-ob.fly.dev/ws.
-  // ?server=host[:port] или полный ?server=wss://host/path переопределяет выбор.
-  const LOCAL_WS = "ws://localhost:8080/ws";
-  const PROD_WS = "wss://arena-ob.fly.dev/ws";
-  const WS_URL = (function () {
-    const param = new URLSearchParams(location.search).get("server");
-    if (!param) {
-      const h = location.hostname;
-      const local = h === "" || h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h === "::1";
-      return local ? LOCAL_WS : PROD_WS;
-    }
-    if (/^wss?:\/\//.test(param)) return param;
-    const local = /^(localhost|127\.0\.0\.1)(:|$)/.test(param);
-    return (local ? "ws://" : "wss://") + param + "/ws";
-  })();
+// connect(canvas, opts, callbacks) открывает игровую сессию: сокет, ввод, цикл отрисовки.
+// Состояние мира живёт в замыкании сессии, вне реактивности Vue; наружу — только колбэки.
+import { createRenderer } from "./render.js";
 
-  // HTTP-адрес того же сервера: ws(s)://host/ws → http(s)://host/<path>.
-  function httpUrl(path, search) {
-    const u = new URL(WS_URL);
-    u.protocol = u.protocol === "wss:" ? "https:" : "http:";
-    u.pathname = u.pathname.replace(/\/ws\/?$/, "") + path;
-    u.search = search || "";
-    return u.toString();
+// ---- Профиль: имя и постоянный ключ игрока в localStorage ----
+// localStorage может быть недоступен (приватный режим, file://) — тогда
+// работаем без сохранения: ключ живёт до перезагрузки страницы.
+const NAME_KEY = "arena.name", PLAYER_KEY = "arena.playerKey";
+function storageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function storageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* без сохранения */ } }
+
+let memKey = null;
+export function playerKey() {
+  let k = storageGet(PLAYER_KEY) || memKey;
+  if (!k) {
+    k = crypto.randomUUID ? crypto.randomUUID() : fallbackUUID();
+    storageSet(PLAYER_KEY, k);
   }
-  const LEADERBOARD_URL = httpUrl("/leaderboard", "n=10");
+  return (memKey = k);
+}
+function rememberPlayerKey(k) {
+  memKey = k;
+  storageSet(PLAYER_KEY, k);
+}
+// crypto.randomUUID есть только в secure context (https, localhost); по LAN-IP — нет.
+function fallbackUUID() {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// Имя: 2–16 символов (кодовых точек, как руны на сервере) после обрезки пробелов.
+export const NAME_MIN = 2;
+export const NAME_MAX = 16;
+export const savedName = () => storageGet(NAME_KEY) || "";
+export const saveName = (name) => storageSet(NAME_KEY, String(name).trim());
+export const validName = (raw) => {
+  const n = [...String(raw).trim()].length;
+  return n >= NAME_MIN && n <= NAME_MAX;
+};
+
+/**
+ * @typedef {"connecting" | "play" | "intermission"} Phase
+ * @typedef {{ reason: string, code: number, reconnecting: boolean }} DisconnectInfo
+ *   code — close-код WebSocket (0 — сокет не открылся или не дождались welcome);
+ *   reconnecting: false — вход не удался или комнаты больше нет (4004),
+ *   сессия окончена (дальше только close()).
+ * @typedef {{ id: number, name: string, score: number }} ScoreRow
+ * @typedef {{ myId: number, winnerId: number, scores: ScoreRow[] }} GameOver
+ *   winnerId 0 — ничья; scores отсортированы по убыванию очков.
+ * @typedef {{ room: string, mode: string }} JoinInfo
+ *   Комната и режим из welcome — при каждом входе, в том числе после реконнекта.
+ * @typedef {{
+ *   onJoin?: (info: JoinInfo) => void,
+ *   onPhase?: (phase: Phase) => void,
+ *   onDisconnect?: (info: DisconnectInfo) => void,
+ *   onGameOver?: (result: GameOver) => void,
+ * }} Callbacks
+ */
+
+/**
+ * Открывает сессию и сразу подключается. close() закрывает сокет, останавливает
+ * цикл отрисовки и снимает обработчики ввода; после него колбэки не вызываются.
+ * @param {HTMLCanvasElement} canvas
+ * Куда входить: roomId — в конкретную комнату (/ws?room=), иначе mode — быстрая
+ * игра (/ws?mode=, сервер подбирает или создаёт комнату).
+ * @param {{ name: string, playerKey: string, wsUrl: string, apiUrl: string,
+ *           roomId?: string, mode?: string }} opts
+ * @param {Callbacks} [callbacks]
+ * @returns {{ close: () => void }}
+ */
+export function connect(canvas, opts, callbacks = {}) {
+  const WS_URL = (function () {
+    const u = new URL(opts.wsUrl);
+    if (opts.roomId) u.searchParams.set("room", opts.roomId);
+    else if (opts.mode) u.searchParams.set("mode", opts.mode);
+    return u.toString();
+  })();
+  // Комната удалена или не существует — сервер закрывает сокет этим кодом; реконнект бессмыслен.
+  const CLOSE_ROOM_NOT_FOUND = 4004;
+
+  const LEADERBOARD_URL = opts.apiUrl.replace(/\/$/, "") + "/leaderboard?n=10";
 
   // Значения по умолчанию на случай старого сервера без speed/radius в welcome.
   const DEFAULT_SPEED = 200;  // единиц в секунду
@@ -41,48 +96,44 @@
     connected: false,
     welcome: null,   // {playerId, name, color, tickRate, width, height, ...}
     latest: null,    // последний snapshot
-    status: "idle",  // состояние сокета: idle (до входа) / connecting / connected / disconnected
+    status: "idle",  // состояние сокета: idle (до входа / после неудачного входа) / connecting / connected / disconnected
   };
-  window.net = net;
 
-  // ---- Профиль: имя и постоянный ключ игрока в localStorage ----
-  // localStorage может быть недоступен (приватный режим, file://) — тогда
-  // работаем без сохранения: ключ живёт до перезагрузки страницы.
-  const NAME_KEY = "arena.name", PLAYER_KEY = "arena.playerKey";
-  function storageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
-  function storageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* без сохранения */ } }
-
-  let memKey = null;
-  function playerKey() {
-    let k = storageGet(PLAYER_KEY) || memKey;
-    if (!k) {
-      k = crypto.randomUUID ? crypto.randomUUID() : fallbackUUID();
-      storageSet(PLAYER_KEY, k);
-    }
-    return (memKey = k);
+  // ---- Колбэки во Vue и жизненный цикл сессии ----
+  let closed = false;
+  const offs = []; // отписки от всех обработчиков ввода сессии
+  function on(target, type, fn) {
+    target.addEventListener(type, fn);
+    offs.push(() => target.removeEventListener(type, fn));
   }
-  // crypto.randomUUID есть только в secure context (https, localhost); по LAN-IP — нет.
-  function fallbackUUID() {
-    const b = crypto.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
-    const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
-    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  function emit(name, arg) {
+    const f = callbacks[name];
+    if (!closed && f) f(arg);
   }
-
-  // Имя: 2–16 символов (кодовых точек, как руны на сервере) после обрезки пробелов.
-  net.NAME_MIN = 2;
-  net.NAME_MAX = 16;
-  net.savedName = () => storageGet(NAME_KEY) || "";
-  net.validName = (raw) => {
-    const n = [...String(raw).trim()].length;
-    return n >= net.NAME_MIN && n <= net.NAME_MAX;
-  };
+  // Фаза для оверлеев: connecting — до welcome/первого снапшота (и на время реконнекта),
+  // дальше — фаза раунда из снапшота (у старого сервера без раундов — всегда play).
+  let phase = null;
+  function setPhase(p) {
+    if (p === phase) return;
+    const prev = phase;
+    phase = p;
+    emit("onPhase", p);
+    if (prev === "play" && p === "intermission") emit("onGameOver", gameOver(net.latest));
+  }
+  function gameOver(snap) {
+    const round = snap.round || {};
+    const scores = (round.scores || snap.players || [])
+      .map(r => ({ id: r.id, name: r.name || "—", score: r.score }))
+      .sort((a, b) => b.score - a.score || a.id - b.id);
+    return { myId: net.welcome.playerId, winnerId: round.winnerId || 0, scores };
+  }
 
   // ---- Сокет, join и реконнект ----
   // Первое сообщение после open — {type:"join", name, playerKey}; без него сервер
   // через 5 с закрывает соединение и welcome не шлёт.
   // Первый вход (после «Играть»): если сокет закрылся до welcome или welcome не
-  // пришёл за WELCOME_TIMEOUT_MS после open — вход не удался, net.onJoinFailed.
+  // пришёл за WELCOME_TIMEOUT_MS после open — вход не удался,
+  // onDisconnect({reconnecting: false}).
   // После первого welcome обрывы лечатся реконнектом, join шлётся снова с теми же данными.
   // Статус отражает только текущий сокет: события старого сокета (его close/error
   // могут прийти уже после открытия нового) игнорируются — иначе статус залипал бы
@@ -90,39 +141,37 @@
   const RECONNECT_MIN_MS = 500, RECONNECT_MAX_MS = 5000;
   const WELCOME_TIMEOUT_MS = 5000;
   let ws = null;
-  let join = null;         // {type, name, playerKey} — что шлём при каждом подключении
+  // Что шлём при каждом подключении; имя уже проверено лобби.
+  const join = { type: "join", name: String(opts.name).trim(), playerKey: opts.playerKey };
   let joined = false;      // был ли welcome с момента «Играть»
   let reconnectDelay = RECONNECT_MIN_MS;
   let reconnectTimer = 0;
   let welcomeTimer = 0;
 
-  // Вход: имя уже проверено экраном входа. Сохраняем его и подключаемся.
-  net.start = function (name) {
-    name = String(name).trim();
-    storageSet(NAME_KEY, name);
-    join = { type: "join", name, playerKey: playerKey() };
-    joined = false;
-    reconnectDelay = RECONNECT_MIN_MS;
-    connect();
-  };
-
-  function failJoin(reason) {
+  // Закрывает текущий сокет и отменяет таймеры; события этого сокета дальше игнорируются.
+  function dropSocket() {
     clearTimeout(welcomeTimer);
     clearTimeout(reconnectTimer);
     const sock = ws;
-    ws = null; // дальнейшие события этого сокета игнорируются
+    ws = null;
     if (sock) sock.close();
     net.connected = false;
-    net.status = "idle";
-    if (net.onJoinFailed) net.onJoinFailed(reason);
   }
 
-  function connect() {
+  function failJoin(reason, code = 0) {
+    dropSocket();
+    net.status = "idle";
+    emit("onDisconnect", { reason, code, reconnecting: false });
+  }
+
+  function openSocket() {
     clearTimeout(reconnectTimer);
     clearTimeout(welcomeTimer);
+    if (closed) return;
     const sock = new WebSocket(WS_URL);
     ws = sock;
     net.status = "connecting";
+    setPhase("connecting");
     sock.onopen = () => {
       if (sock !== ws) return;
       net.status = "connected";
@@ -141,11 +190,14 @@
       if (sock !== ws) return;
       net.connected = false;
       net.status = "disconnected";
-      if (!joined) {
-        failJoin(ev.reason ? `Сервер закрыл соединение: ${ev.reason}` : "Не удалось подключиться к серверу");
+      // 4004 — комнаты нет: и при входе, и посреди игры (комнату удалили) — только в лобби.
+      if (!joined || ev.code === CLOSE_ROOM_NOT_FOUND) {
+        failJoin(ev.reason ? `Сервер закрыл соединение: ${ev.reason}` : "Не удалось подключиться к серверу", ev.code);
         return;
       }
-      reconnectTimer = setTimeout(connect, reconnectDelay);
+      emit("onDisconnect", { reason: ev.reason || "Соединение потеряно", code: ev.code, reconnecting: true });
+      setPhase("connecting");
+      reconnectTimer = setTimeout(openSocket, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
     };
     sock.onmessage = (ev) => { if (sock === ws) onMessage(ev); };
@@ -161,8 +213,8 @@
       reconnectDelay = RECONNECT_MIN_MS;
       // Сервер заменяет некорректный ключ своим — сохраняем, что он вернул.
       if (typeof msg.playerKey === "string" && msg.playerKey && msg.playerKey !== join.playerKey) {
-        join.playerKey = memKey = msg.playerKey;
-        storageSet(PLAYER_KEY, msg.playerKey);
+        join.playerKey = msg.playerKey;
+        rememberPlayerKey(msg.playerKey);
       }
       // Новое подключение (в том числе после реконнекта): новый playerId,
       // старые предсказания и буфер снапшотов к нему не относятся.
@@ -177,8 +229,11 @@
         speed: typeof msg.speed === "number" ? msg.speed : DEFAULT_SPEED,
         radius: typeof msg.radius === "number" ? msg.radius : DEFAULT_RADIUS,
         obstacles: Array.isArray(msg.obstacles) ? msg.obstacles : [],
+        room: typeof msg.room === "string" ? msg.room : "",
+        mode: typeof msg.mode === "string" ? msg.mode : "",
       };
       net.connected = true;
+      emit("onJoin", { room: net.welcome.room, mode: net.welcome.mode });
     } else if (msg.type === "snapshot") {
       net.latest = msg;
       net.latestAt = performance.now();
@@ -187,6 +242,10 @@
       // Попадания есть только в снапшоте своего тика — отдаём каждый снапшот,
       // а не только последний к кадру, чтобы события не терялись.
       if (net.onSnapshot) net.onSnapshot(msg, net.latestAt);
+      for (const e of msg.events || []) {
+        if (e.type === "shot" && e.playerId === net.welcome.playerId) onOwnShot(net.latestAt);
+      }
+      setPhase(msg.round && msg.round.phase === "intermission" ? "intermission" : "play");
     }
   }
 
@@ -257,14 +316,30 @@
   const mouse = { x: 0, y: 0, has: false };
   let seq = 0;
 
+  // Клик во время перезарядки (FireCooldown 0.2 с на сервере) сервер отбросил бы молча:
+  // такой клик ставим в очередь — fire держится, пока сервер не выстрелит (событие shot)
+  // или пока окно не истечёт. Клик вне перезарядки — как раньше, один Input с fire.
+  const FIRE_COOLDOWN_MS = 200; // game.DefaultConfig().FireCooldown
+  const FIRE_QUEUE_SLACK_MS = 100;
+  let lastShotAt = -Infinity;   // когда пришло событие своего выстрела
+  let fireQueuedUntil = 0;
+  function onOwnShot(at) {
+    lastShotAt = at;
+    fireQueuedUntil = 0; // выстрел из очереди состоялся
+  }
+
   // Нажатие огня (не удержание) — для «сухого щелчка» при пустом магазине.
-  function fireAttempt() { if (net.onFireAttempt) net.onFireAttempt(); }
+  function fireAttempt() {
+    const now = performance.now();
+    if (now - lastShotAt < FIRE_COOLDOWN_MS) fireQueuedUntil = lastShotAt + FIRE_COOLDOWN_MS + FIRE_QUEUE_SLACK_MS;
+    if (net.onFireAttempt) net.onFireAttempt();
+  }
 
   // Пока фокус в поле ввода (экран входа), клавиши — тексту, а не игре.
   const typing = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
   net.typing = typing;
 
-  window.addEventListener("keydown", (e) => {
+  on(window, "keydown", (e) => {
     if (typing(e)) return;
     // Shift — одноразовый запрос рывка: уходит в ближайшем Input, удерживать не нужно.
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
@@ -281,32 +356,33 @@
       if (!e.repeat) fireAttempt();
     }
   });
-  window.addEventListener("keyup", (e) => {
+  on(window, "keyup", (e) => {
     if (typing(e)) return;
     const k = KEYS[e.code];
     if (!k) return;
     e.preventDefault();
     input[k] = false;
   });
-  // Сбрасываем клавиши при потере фокуса, чтобы игрок не "залип".
-  window.addEventListener("blur", () => {
+  // Сбрасываем клавиши при потере фокуса и уходе со вкладки, чтобы игрок не "залип".
+  const releaseKeys = () => {
     input.up = input.down = input.left = input.right = input.fire = false;
-  });
-
-  net.attachCanvas = function (canvas) {
-    canvas.addEventListener("mousemove", (e) => {
-      const r = canvas.getBoundingClientRect();
-      const w = net.welcome ? net.welcome.width : canvas.width;
-      const h = net.welcome ? net.welcome.height : canvas.height;
-      mouse.x = (e.clientX - r.left) * (w / r.width);
-      mouse.y = (e.clientY - r.top) * (h / r.height);
-      mouse.has = true;
-    });
-    canvas.addEventListener("mousedown", (e) => {
-      if (e.button === 0) { input.fire = true; fireLatched = true; fireAttempt(); }
-    });
-    window.addEventListener("mouseup", (e) => { if (e.button === 0) input.fire = false; });
+    fireQueuedUntil = 0;
   };
+  on(window, "blur", releaseKeys);
+  on(document, "visibilitychange", () => { if (document.hidden) releaseKeys(); });
+
+  on(canvas, "mousemove", (e) => {
+    const r = canvas.getBoundingClientRect();
+    const w = net.welcome ? net.welcome.width : canvas.width;
+    const h = net.welcome ? net.welcome.height : canvas.height;
+    mouse.x = (e.clientX - r.left) * (w / r.width);
+    mouse.y = (e.clientY - r.top) * (h / r.height);
+    mouse.has = true;
+  });
+  on(canvas, "mousedown", (e) => {
+    if (e.button === 0) { input.fire = true; fireLatched = true; fireAttempt(); }
+  });
+  on(window, "mouseup", (e) => { if (e.button === 0) input.fire = false; });
 
   // ---- Симуляция (зеркало game.World.Update на сервере) ----
   function moveVector(i) {
@@ -412,6 +488,8 @@
     meDead = false;
     dash.left = 0; dash.cd = 0;
     boostFactor = 1;
+    lastShotAt = -Infinity;
+    fireQueuedUntil = 0;
   }
 
   function serverMe(snap) {
@@ -483,7 +561,7 @@
       seq: ++seq,
       moveX: m.x, moveY: m.y,
       angle: input.angle,
-      fire: input.fire || fireLatched,
+      fire: input.fire || fireLatched || performance.now() < fireQueuedUntil,
       dash: dashLatched, // одноразово: true только в одном Input после нажатия Shift
       // Эти булевы поля сервер игнорирует; оставлены для совместимости/отладки.
       up: input.up, down: input.down, left: input.left, right: input.right,
@@ -586,4 +664,39 @@
     if (!lb.inFlight && performance.now() - lb.at >= LEADERBOARD_TTL_MS) fetchLeaderboard();
     return lb;
   };
-})();
+
+  // ---- Цикл отрисовки и запуск ----
+  const draw = createRenderer(canvas, net, on);
+  let raf = 0;
+  let lastDrawAt = 0;
+  function frame(now) {
+    if (closed) return;
+    lastDrawAt = now;
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+  raf = requestAnimationFrame(frame);
+  openSocket();
+
+  // Heartbeat скрытой вкладки: requestAnimationFrame там не вызывается, ввод (он же
+  // heartbeat) перестаёт уходить, и сервер через ~10 с отключает игрока по таймауту
+  // чтения. Таймеры в фоне браузер замедляет до ~1 раза в секунду — этого хватает:
+  // update догоняет пропущенные тики (до 0.25 с за вызов) и шлёт Input без клавиш.
+  const HEARTBEAT_MS = 250;
+  const heartbeat = setInterval(() => {
+    const now = performance.now();
+    if (now - lastDrawAt > HEARTBEAT_MS) net.update(now);
+  }, HEARTBEAT_MS);
+
+  return {
+    close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      cancelAnimationFrame(raf);
+      dropSocket();
+      net.status = "idle";
+      for (const off of offs.splice(0)) off();
+    },
+  };
+}
