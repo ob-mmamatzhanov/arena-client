@@ -1,2 +1,52 @@
-body { margin: 0; background: #111; color: #ccc; font: 14px sans-serif;
-       display: flex; flex-direction: column; align-items: center; }
+/* Общие токены O!Арены: неоновая фиолетово-розовая палитра, «стекло», свечение.
+   Компоненты берут цвета только отсюда — без разбросанных по файлам hex-кодов. */
+:root {
+  --bg: #12051f;
+  --bg-2: #1c0732;
+  --pink: #ff2fa8;
+  --magenta: #d01d9f;
+  --violet: #8b2be2;
+  --text: #f6efff;
+  --muted: #b9a7d4;
+  --faint: #7f6d9c;
+  --danger: #ff5c7a;
+  --ok: #3ddc84;
+  --glass: rgba(38, 14, 64, 0.55);
+  --glass-strong: rgba(30, 10, 52, 0.82);
+  --border: rgba(255, 140, 225, 0.16);
+  --border-hot: rgba(255, 79, 191, 0.75);
+  --grad: linear-gradient(100deg, #ff2fa8 0%, #e3209f 45%, #a52be0 100%);
+  --glow: 0 0 24px rgba(255, 47, 168, 0.45), 0 0 2px rgba(255, 140, 220, 0.9);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --font: "Rubik", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { background: var(--bg); }
+body {
+  margin: 0; min-height: 100vh; color: var(--text); font: 15px/1.4 var(--font);
+  display: flex; flex-direction: column; align-items: center;
+  background:
+    radial-gradient(1100px 700px at 75% 15%, rgba(139, 43, 226, 0.35), transparent 60%),
+    radial-gradient(900px 600px at 10% 90%, rgba(255, 47, 168, 0.16), transparent 60%),
+    linear-gradient(180deg, var(--bg-2), var(--bg) 70%);
+  background-attachment: fixed;
+}
+#app { width: 100%; display: flex; flex-direction: column; align-items: center; }
+
+button, input { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--pink); outline-offset: 2px; }
+
+/* Стеклянная панель — общий фон карточек лобби. */
+.glass {
+  background: var(--glass); border: 1px solid var(--border); border-radius: var(--radius);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+                            transition-duration: 0.01ms !important; }
+}

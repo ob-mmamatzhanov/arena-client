@@ -105,13 +105,20 @@ export const fx = (function () {
     if (audio.state === "suspended") audio.resume();
   }
   window.addEventListener("pointerdown", ensureAudio);
+  // Выключенный звук помнится между визитами: его можно переключить и в лобби (настройки).
+  const MUTE_KEY = "arena.muted";
+  try { muted = localStorage.getItem(MUTE_KEY) === "1"; } catch { /* без сохранения */ }
+  const muteListeners = new Set();
+  function setMuted(v) {
+    muted = !!v;
+    if (master) master.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.01);
+    try { localStorage.setItem(MUTE_KEY, muted ? "1" : "0"); } catch { /* без сохранения */ }
+    for (const f of muteListeners) f(muted);
+  }
   window.addEventListener("keydown", (e) => {
     ensureAudio();
     // В поле ввода (экран входа) «м» — буква имени, а не звук.
-    if (e.code === "KeyM" && !e.repeat && !(e.target instanceof HTMLInputElement)) {
-      muted = !muted;
-      if (master) master.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.01);
-    }
+    if (e.code === "KeyM" && !e.repeat && !(e.target instanceof HTMLInputElement)) setMuted(!muted);
   });
 
   const canPlay = () => audio && audio.state === "running" && !muted;
@@ -323,6 +330,9 @@ export const fx = (function () {
     shakeOffset,
     playDryClick,
     muted: () => muted,
+    setMuted,
+    /** Подписка на смену «звук выкл.»; возвращает отписку. */
+    onMuteChange: (f) => { muteListeners.add(f); return () => muteListeners.delete(f); },
     audioReady: () => !!audio && audio.state === "running",
     particleCount: () => particles.length,
   };
