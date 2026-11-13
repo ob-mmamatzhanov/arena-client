@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { connect, type GameOver, type Phase } from "../net.js";
+import { connect, type GameOver, type Phase, type ZombieOver } from "../net.js";
 import { MODE_LABEL, inviteLink, type GameOpts } from "../api";
 
 // Мир, ввод и цикл отрисовки живут в net.js вне реактивности;
@@ -16,18 +16,21 @@ const lost = ref<string | null>(null);       // причина обрыва, п�
 const result = ref<GameOver | null>(null);   // итоги последнего раунда
 const mode = ref("mode" in props.opts ? props.opts.mode : ""); // уточняется по welcome
 const code = "code" in props.opts ? props.opts.code ?? "" : "";
+const room = ref("");                        // id комнаты из welcome — для «Ещё раз»
+const zombieResult = ref<ZombieOver | null>(null); // итог игры режима zombie (фаза gameover)
 
 let session: { close: () => void } | null = null;
 
-onMounted(() => {
-  session = connect(canvas.value!, { ...props.opts }, {
+function start(opts: GameOpts) {
+  session = connect(canvas.value!, { ...opts }, {
     onJoin(info) {
       if (info.mode) mode.value = info.mode;
+      if (info.room) room.value = info.room;
     },
     onPhase(p) {
       phase.value = p;
       if (p !== "connecting") lost.value = null; // снова в игре — связь восстановлена
-      if (p === "play") result.value = null;
+      if (p === "play") { result.value = null; zombieResult.value = null; }
     },
     onDisconnect({ reason, code, reconnecting }) {
       if (reconnecting) lost.value = reason;
@@ -36,7 +39,15 @@ onMounted(() => {
     onGameOver(r) {
       result.value = r;
     },
+    onZombieOver(r) {
+      zombieResult.value = r;
+      restartAt.value = performance.now() + r.restartIn * 1000;
+    },
   });
+}
+
+onMounted(() => {
+  start(props.opts);
   on(window, "keydown", onKeyCapture, true);
   on(window, "keydown", onKey);
 });
@@ -44,8 +55,26 @@ onMounted(() => {
 onUnmounted(() => {
   session?.close();
   session = null;
+  clearInterval(clock);
   for (const off of offs.splice(0)) off();
 });
+
+// ---- Конец игры в режиме zombie ----
+// Сервер сам начинает новую игру с первой волны через restartIn секунд — тогда фаза
+// станет play и оверлей закроется. «Ещё раз» — переподключение в ту же комнату.
+const restartAt = ref(0);
+const now = ref(performance.now());
+const clock = setInterval(() => (now.value = performance.now()), 250);
+const restartLeft = computed(() => Math.max(0, Math.ceil((restartAt.value - now.value) / 1000)));
+const isZombie = computed(() => mode.value === "zombie");
+
+function playAgain() {
+  if (!room.value) return;
+  session?.close();
+  zombieResult.value = null;
+  phase.value = "connecting";
+  start({ ...props.opts, roomId: room.value });
+}
 
 const offs: (() => void)[] = [];
 function on(t: EventTarget, type: string, fn: (e: KeyboardEvent) => void, capture = false) {
@@ -86,7 +115,7 @@ function onKeyCapture(e: KeyboardEvent) {
   if (menu.value && e.code !== "Escape") e.stopImmediatePropagation();
 }
 function onKey(e: KeyboardEvent) {
-  if (e.code !== "Escape" || e.repeat) return;
+  if (e.code !== "Escape" || e.repeat || phase.value === "gameover") return; // у gameover свой оверлей с кнопками
   e.preventDefault();
   openMenu(!menu.value);
 }
@@ -133,6 +162,21 @@ const summary = computed(() => {
       <div v-else-if="phase === 'connecting'" class="overlay">
         <div class="panel"><div class="title">Подключение…</div></div>
       </div>
+      <div v-else-if="phase === 'gameover' && zombieResult" class="overlay">
+        <div class="panel">
+          <div class="title">Все погибли</div>
+          <div class="stats">
+            <div><span>волна</span><b>{{ zombieResult.wave }}</b></div>
+            <div><span>убито зомби</span><b>{{ zombieResult.kills }}</b></div>
+            <div><span>из них вами</span><b>{{ zombieResult.myKills }}</b></div>
+          </div>
+          <div v-if="restartLeft > 0" class="sub">Новая игра с первой волны через {{ restartLeft }} с</div>
+          <div class="row">
+            <button type="button" class="primary" :disabled="!room" @click="playAgain">Ещё раз</button>
+            <button type="button" @click="emit('exit')">В лобби</button>
+          </div>
+        </div>
+      </div>
       <div v-else-if="menu" class="overlay" @click.self="openMenu(false)">
         <div class="panel menu">
           <div class="title">Меню</div>
@@ -140,7 +184,7 @@ const summary = computed(() => {
           <ul class="keys">
             <li><b>WASD</b> / стрелки — движение</li>
             <li><b>мышь</b> — прицел, <b>ЛКМ</b> / <b>пробел</b> — огонь</li>
-            <li><b>Shift</b> — рывок, <b>Tab</b> — счёт, <b>M</b> — звук</li>
+            <li><b>Shift</b> — рывок, <b>Tab</b> — {{ isZombie ? "игроки" : "счёт" }}, <b>M</b> — звук</li>
           </ul>
           <div class="row">
             <button ref="menuFirst" type="button" class="primary" @click="openMenu(false)">Продолжить</button>
@@ -159,7 +203,7 @@ const summary = computed(() => {
         </button>
       </span>
       <span v-if="phase === 'intermission' && lost === null" class="summary">{{ summary }}</span>
-      <span v-else class="hint">Esc — меню · Tab — счёт</span>
+      <span v-else class="hint">Esc — меню · Tab — {{ isZombie ? "игроки" : "счёт" }}</span>
       <button type="button" class="small exit" @click="blurAfter($event, () => emit('exit'))">В лобби</button>
     </div>
   </div>
@@ -181,6 +225,11 @@ canvas { display: block; width: 100%; height: auto; background: #1e1e24; cursor:
 .keys { margin: 0; padding: 0; list-style: none; color: #bbb; font-size: 13px; line-height: 1.7; }
 .keys b { color: #ddd; }
 .row { display: flex; gap: 8px; }
+.stats { display: flex; gap: 22px; }
+.stats div { display: flex; flex-direction: column; gap: 2px; }
+.stats span { color: #888; font-size: 12px; }
+.stats b { color: #c5e1a5; font: bold 26px monospace; }
+button:disabled { opacity: 0.5; cursor: default; }
 
 .bar { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 6px 10px;
        background: #1b1b22; border: 1px solid #333; border-radius: 6px; color: #ccc; font-size: 13px; }

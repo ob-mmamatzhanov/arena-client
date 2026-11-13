@@ -95,6 +95,77 @@ export function makePlayer(colorIndex, frames = 4) {
   return out;
 }
 
+// --- Зомби ----------------------------------------------------------------------
+// Тот же силуэт 32×32, что у игрока, смотрит вправо. Кожа серо-зелёная, одежда
+// тёмная и рваная, оружия нет — обе руки вытянуты вперёд. Кадры — шарканье:
+// ноги и руки покачиваются противофазно.
+
+export const ZOMBIE_SKIN = "#8fae7a";
+export const ZOMBIE_CLOTH = "#4a4a52";
+
+export function makeZombie(frames = 2) {
+  const skin = ZOMBIE_SKIN, cloth = ZOMBIE_CLOTH;
+  const outline = "rgba(15,12,10,0.85)";
+  const out = [];
+
+  for (let f = 0; f < frames; f++) {
+    const [c, ctx] = canvas(PLAYER_SIZE, PLAYER_SIZE);
+    const cx = 16, cy = 16;
+    const s = f % 2 ? 1 : -1; // фаза шарканья
+    const legSwing = s * 4;
+
+    // ноги — короткий шаркающий шаг
+    ctx.fillStyle = "#2e2e33";
+    rounded(ctx, cx - 3 + legSwing, cy - 8, 6, 5, 2);
+    rounded(ctx, cx - 3 - legSwing, cy + 3, 6, 5, 2);
+
+    // тело — тот же овал, что у игрока
+    ctx.fillStyle = outline;
+    ellipse(ctx, cx - 1, cy, 9.5, 12.5);
+    ctx.fillStyle = cloth;
+    ellipse(ctx, cx - 1, cy, 8, 11);
+    // рваньё: светлые прорехи и клочья по краю одежды
+    ctx.fillStyle = shade(cloth, 0.12);
+    rounded(ctx, cx - 6, cy - 7, 3, 2, 1);
+    rounded(ctx, cx - 4, cy + 5, 4, 1.5, 0.7);
+    ctx.fillStyle = shade(cloth, -0.18);
+    for (const [x, y] of [[cx - 9, cy - 4], [cx - 9.5, cy + 2], [cx - 7, cy + 8], [cx - 7, cy - 9]]) {
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 2, y + 1.5); ctx.lineTo(x, y + 3); ctx.fill();
+    }
+    ctx.fillStyle = skin; // кожа сквозь дыру
+    circle(ctx, cx - 3, cy + 2, 1.4);
+
+    // руки вытянуты вперёд — рукава и кисти; в шаге одна рука выдвигается дальше
+    // другой (в такт ногам), и чуть сходятся/расходятся
+    for (const [ay, reach] of [[cy - 6 + s * 0.8, s * 1.5], [cy + 6 - s * 0.8, -s * 1.5]]) {
+      const x0 = cx + 1 + reach;
+      ctx.fillStyle = outline;
+      rounded(ctx, x0, ay - 2.5, 13, 5, 2.5);
+      ctx.fillStyle = cloth;
+      rounded(ctx, x0 + 0.5, ay - 2, 7, 4, 2);
+      ctx.fillStyle = skin;
+      rounded(ctx, x0 + 7, ay - 2, 5.5, 4, 2);
+      ctx.fillStyle = shade(skin, -0.25); // пальцы
+      ctx.fillRect(x0 + 11.5, ay - 1.5, 1, 1); ctx.fillRect(x0 + 11.5, ay + 0.5, 1, 1);
+    }
+
+    // голова — без волос, с тёмными пятнами
+    ctx.fillStyle = "rgba(25,35,20,0.9)";
+    circle(ctx, cx, cy, 6);
+    ctx.fillStyle = skin;
+    circle(ctx, cx - 0.5, cy - 0.5, 5.5);
+    ctx.fillStyle = shade(skin, -0.22);
+    circle(ctx, cx - 2.5, cy + 1.5, 1.6);
+    circle(ctx, cx + 1, cy - 3, 1.1);
+    ctx.fillStyle = "#c62828"; // глаза
+    ctx.fillRect(cx + 3, cy - 2.5, 1.2, 1.2);
+    ctx.fillRect(cx + 3, cy + 1.3, 1.2, 1.2);
+
+    out.push(c);
+  }
+  return out;
+}
+
 // --- Кирпичная стена ----------------------------------------------------------
 // Бесшовный тайл 32×32: 4 ряда по 2 кирпича со сдвигом в полкирпича.
 
@@ -266,6 +337,7 @@ export function makeFloor(seed = 7) {
 export function buildSprites() {
   return {
     players: PALETTE.map((_, i) => makePlayer(i)),
+    zombie: makeZombie(),
     wall: makeWall(),
     crate: makeCrate(),
     floor: makeFloor(),

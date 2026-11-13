@@ -42,7 +42,8 @@ export const validName = (raw) => {
 };
 
 /**
- * @typedef {"connecting" | "play" | "intermission"} Phase
+ * @typedef {"connecting" | "play" | "intermission" | "gameover"} Phase
+ *   gameover — только режим zombie: все игроки мертвы, мир заморожен до новой игры.
  * @typedef {{ reason: string, code: number, reconnecting: boolean }} DisconnectInfo
  *   code — close-код WebSocket (0 — сокет не открылся или не дождались welcome);
  *   reconnecting: false — вход не удался или комнаты больше нет (4004),
@@ -50,6 +51,9 @@ export const validName = (raw) => {
  * @typedef {{ id: number, name: string, score: number }} ScoreRow
  * @typedef {{ myId: number, winnerId: number, scores: ScoreRow[] }} GameOver
  *   winnerId 0 — ничья; scores отсортированы по убыванию очков.
+ * @typedef {{ myId: number, wave: number, kills: number, myKills: number, restartIn: number }} ZombieOver
+ *   Итог игры режима zombie: до какой волны дошли, сколько зомби убили все и вы сами;
+ *   restartIn — секунд до новой игры с первой волны (сервер начнёт её сам).
  * @typedef {{ room: string, mode: string }} JoinInfo
  *   Комната и режим из welcome — при каждом входе, в том числе после реконнекта.
  * @typedef {{
@@ -57,6 +61,7 @@ export const validName = (raw) => {
  *   onPhase?: (phase: Phase) => void,
  *   onDisconnect?: (info: DisconnectInfo) => void,
  *   onGameOver?: (result: GameOver) => void,
+ *   onZombieOver?: (result: ZombieOver) => void,
  * }} Callbacks
  */
 
@@ -119,6 +124,18 @@ export function connect(canvas, opts, callbacks = {}) {
     phase = p;
     emit("onPhase", p);
     if (prev === "play" && p === "intermission") emit("onGameOver", gameOver(net.latest));
+    if (p === "gameover") emit("onZombieOver", zombieOver(net.latest));
+  }
+  function zombieOver(snap) {
+    const round = snap.round || {};
+    const me = serverMe(snap);
+    return {
+      myId: net.welcome.playerId,
+      wave: round.wave || 0,
+      kills: round.kills || 0,
+      myKills: me ? me.score : 0, // в режиме zombie очки — убитые зомби
+      restartIn: round.timeLeft || 0,
+    };
   }
   function gameOver(snap) {
     const round = snap.round || {};
@@ -250,7 +267,8 @@ export function connect(canvas, opts, callbacks = {}) {
       for (const e of msg.events || []) {
         if (e.type === "shot" && e.playerId === net.welcome.playerId) onOwnShot(net.latestAt);
       }
-      setPhase(msg.round && msg.round.phase === "intermission" ? "intermission" : "play");
+      const rp = msg.round && msg.round.phase;
+      setPhase(rp === "intermission" || rp === "gameover" ? rp : "play");
     }
   }
 
@@ -498,8 +516,11 @@ export function connect(canvas, opts, callbacks = {}) {
     }
   }
 
-  // В intermission сервер отбрасывает ввод целиком и lastSeq не растёт.
-  const frozen = () => net.latest && net.latest.round && net.latest.round.phase === "intermission";
+  // В intermission (и в gameover режима zombie) сервер отбрасывает ввод целиком и lastSeq не растёт.
+  const frozenPhase = (snap) => !!snap.round && (snap.round.phase === "intermission" || snap.round.phase === "gameover");
+  const frozen = () => !!net.latest && frozenPhase(net.latest);
+  // Режим zombie: в round есть wave (в арене поля нет).
+  net.isZombie = (snap) => !!snap && !!snap.round && snap.round.wave !== undefined;
 
   // ---- Prediction / reconciliation ----
   const pred = {
@@ -560,7 +581,7 @@ export function connect(canvas, opts, callbacks = {}) {
 
     // Всё, что сервер уже применил, больше не нужно. В intermission сервер
     // ввод не применит никогда — переигрывать нечего, игрок стоит.
-    pending = snap.round && snap.round.phase === "intermission" ? [] : pending.filter(c => c.seq > me.lastSeq);
+    pending = frozenPhase(snap) ? [] : pending.filter(c => c.seq > me.lastSeq);
 
     boostFactor = me.boosted ? SPEED_MULTIPLIER : 1;
     // Кулдаун рывка сверяем с сервером: после применения pending он уменьшится ещё на
