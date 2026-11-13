@@ -20,7 +20,7 @@ export const MODES = ["arena", "zombie"] as const;
 export type Mode = (typeof MODES)[number];
 export const isMode = (s: unknown): s is Mode => MODES.includes(s as Mode);
 export const MODE_LABEL: Record<string, string> = { arena: "Арена", zombie: "Зомби" };
-export const PHASE_LABEL: Record<string, string> = { play: "идёт бой", intermission: "перерыв" };
+export const PHASE_LABEL: Record<string, string> = { play: "идёт бой", intermission: "перерыв", gameover: "все погибли" };
 
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 8;

@@ -211,6 +211,36 @@ export const fx = (function () {
 
   const WOOD = ["#a8743f", "#c8935a", "#7a4f26", "#e0b47c"];
 
+  // Убит зомби: низкий глухой «бульк» — синус, съезжающий 110 → 55 Гц, и
+  // приглушённый шум поверх. Короче и ниже попадания (180 Гц), не путается с ним.
+  function playZombieKill() {
+    if (!canPlay()) return;
+    const t = audio.currentTime;
+    const osc = audio.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(110, t);
+    osc.frequency.exponentialRampToValueAtTime(55, t + 0.14);
+    const g = audio.createGain();
+    g.gain.setValueAtTime(0.55, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    osc.connect(g).connect(master);
+    osc.start(t);
+    osc.stop(t + 0.17);
+    const src = audio.createBufferSource();
+    src.buffer = noiseBuf;
+    const lp = audio.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 400;
+    const ng = audio.createGain();
+    ng.gain.setValueAtTime(0.3, t);
+    ng.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    src.connect(lp).connect(ng).connect(master);
+    src.start(t);
+    src.stop(t + 0.06);
+  }
+
+  const ZOMBIE_GORE = ["#8fae7a", "#5f8a3e", "#a5d66b", "#3e5f2a"];
+
   // ---------------- События снапшота ----------------
   // ctx: {myId, radius, players: Map id → {x, y, angle}} — состояние на момент события.
   // now — performance.now() получения снапшота (та же шкала, что у кадров).
@@ -247,6 +277,7 @@ export const fx = (function () {
             speed: [80, 240], life: [0.25, 0.5], size: [1.5, 3],
             colors: col ? [col, col, "#ffffff"] : ["#ff3b3b", "#c41d1d", "#ff7070"],
           });
+          // По мне — красная вспышка и тряска; так же и укус зомби (hit с shooterId 0).
           if (e.targetId === c.myId) { flashAt = now; shakeAt = now; }
           playHit();
           break;
@@ -275,6 +306,10 @@ export const fx = (function () {
           burst(e.x, e.y, 26, { speed: [80, 320], life: [0.5, 1.0], size: [2, 4.5], colors: WOOD });
           burst(e.x, e.y, 10, { speed: [20, 90], life: [0.6, 1.2], size: [1, 2], colors: ["#5a3a1c", "#3d2812"] }); // пыль
           playWood(true);
+          break;
+        case "zombieKill": // зомби убит: зелёные брызги там, где он стоял
+          burst(e.x, e.y, 12, { speed: [70, 240], life: [0.3, 0.6], size: [1.5, 3.2], colors: ZOMBIE_GORE });
+          playZombieKill();
           break;
       }
     }

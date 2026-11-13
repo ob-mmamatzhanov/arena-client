@@ -58,6 +58,8 @@ export function createRenderer(canvas, net, on) {
     for (const e of snap.events || []) {
       if (e.type === "hit") flashAt.set(e.targetId, now);
       if (e.type === "kill" && e.shooterId === net.welcome.playerId && e.targetId !== e.shooterId) plusOnes.push(now);
+      // Режим zombie: убитый зомби — тоже +1 к счёту.
+      if (e.type === "zombieKill" && e.shooterId === net.welcome.playerId) plusOnes.push(now);
     }
 
     fx.onSnapshot(snap, now, {
@@ -179,6 +181,90 @@ export function createRenderer(canvas, net, on) {
       if (pb) return { ...p, x: pb.x, y: pb.y, angle: pb.angle }; // только что появился
       return p; // в момент renderTime ещё не было — показываем последнюю позицию
     });
+  }
+
+  // ---- Зомби (режим zombie) ----
+  // Позиции интерполируются по id тем же буфером снапшотов, что у игроков; список
+  // и hp — из последнего снапшота (убитый пропадает сразу, вместе с брызгами zombieKill).
+  function renderZombies(now, latest) {
+    const list = latest.zombies || [];
+    if (!list.length || !interpOn) return list;
+    const pair = net.bracket(now - RENDER_DELAY);
+    if (!pair) return list;
+    const [a, b] = pair;
+    const t = b.t > a.t ? (now - RENDER_DELAY - a.t) / (b.t - a.t) : 1;
+    const from = new Map((a.snap.zombies || []).map(z => [z.id, z]));
+    const to = new Map((b.snap.zombies || []).map(z => [z.id, z]));
+    return list.map(z => {
+      const za = from.get(z.id), zb = to.get(z.id);
+      if (za && zb) return { ...z, x: lerp(za.x, zb.x, t), y: lerp(za.y, zb.y, t) };
+      if (zb) return { ...z, x: zb.x, y: zb.y }; // только что появился
+      return z; // в момент renderTime ещё не было — последняя позиция
+    });
+  }
+
+  // Угол зомби — по направлению движения. Курс берём не из сдвига за кадр (он
+  // крошечный и шумит, когда зомби трётся о стену или толкается с соседом), а от
+  // опорной точки: новый курс — только когда зомби отошёл от неё на ZOMBIE_HEADING_STEP.
+  // К курсу спрайт поворачивается плавно, экспоненциально.
+  const ZOMBIE_SCALE = 1.4;
+  const Z_HALF = PLAYER_SIZE * ZOMBIE_SCALE / 2;
+  const ZOMBIE_HEADING_STEP = 3; // ед. мира
+  const ZOMBIE_TURN_RATE = 8;    // 1/с: за 1/8 с доворачивает ~63% угла
+  const ZOMBIE_HP_FULL = 30;     // hp зомби на сервере (две пули); полоска — только у раненых
+  const zombieView = new Map();  // id -> {ax, ay, heading, angle, t, maxHp}
+
+  function nearestPlayerAngle(z, players) {
+    let best = null, bd = Infinity;
+    for (const p of players) {
+      if (p.dead) continue;
+      const d = Math.hypot(p.x - z.x, p.y - z.y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best ? Math.atan2(best.y - z.y, best.x - z.x) : 0;
+  }
+
+  function zombieState(z, now, players) {
+    let v = zombieView.get(z.id);
+    if (!v) {
+      // Только что появился: смотрит на ближайшего игрока — туда он и пойдёт.
+      const a = nearestPlayerAngle(z, players);
+      zombieView.set(z.id, v = { ax: z.x, ay: z.y, heading: a, angle: a, t: now, maxHp: z.hp });
+    }
+    const dx = z.x - v.ax, dy = z.y - v.ay;
+    if (Math.hypot(dx, dy) >= ZOMBIE_HEADING_STEP) {
+      v.heading = Math.atan2(dy, dx);
+      v.ax = z.x; v.ay = z.y;
+    }
+    const dt = Math.min((now - v.t) / 1000, 0.1);
+    v.angle = lerpAngle(v.angle, v.heading, 1 - Math.exp(-ZOMBIE_TURN_RATE * dt));
+    v.t = now;
+    v.maxHp = Math.max(v.maxHp, z.hp);
+    return v;
+  }
+
+  function drawZombies(snap, now, players) {
+    const list = renderZombies(now, snap);
+    const ids = new Set(list.map(z => z.id));
+    for (const id of zombieView.keys()) if (!ids.has(id)) zombieView.delete(id);
+    const frame = Math.floor(now / 250) % 2; // шарканье
+    for (const z of list) {
+      const v = zombieState(z, now, players);
+      upright(z.x, z.y, v.angle, (a) => {
+        drawPlayer(ctx, S.zombie, 0, 0, a, frame, ZOMBIE_SCALE);
+        if (z.hp < ZOMBIE_HP_FULL) drawZombieHp(z.hp, Math.max(v.maxHp, ZOMBIE_HP_FULL));
+      });
+    }
+  }
+
+  // Полоска hp над зомби (у игроков она под спрайтом — так их не перепутать).
+  function drawZombieHp(hp, max) {
+    const w = 22, h = 3, y = -Z_HALF + 2;
+    const f = Math.max(0, Math.min(1, hp / max));
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(-w / 2 - 1, y - 1, w + 2, h + 2);
+    ctx.fillStyle = `hsl(${Math.round(120 * f)},85%,50%)`;
+    ctx.fillRect(-w / 2, y, w * f, h);
   }
 
   // ---- Препятствия ----
@@ -468,6 +554,39 @@ export function createRenderer(canvas, net, on) {
     ctx.restore();
   }
 
+  // Режим zombie вместо таймера раунда: «Волна N · осталось M». Между волнами
+  // (zombiesLeft 0) — крупный отсчёт до следующей: round.timeLeft — секунд до неё,
+  // досчитываем между снапшотами. Мёртвому отсчёт показывает экран смерти.
+  function drawWaveHud(round, me, now) {
+    const wave = round.wave || 0, left = round.zombiesLeft || 0;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    if (left > 0) {
+      const text = `Волна ${wave} · осталось ${left}`;
+      ctx.font = "bold 18px sans-serif";
+      const hw = ctx.measureText(text).width / 2 + 8;
+      ctx.globalAlpha = hudAlpha(W / 2 - hw, 0, W / 2 + hw, 32);
+      ctx.strokeText(text, W / 2, 22);
+      ctx.fillStyle = "#e8e8e8";
+      ctx.fillText(text, W / 2, 22);
+    } else if (!(me && me.dead)) {
+      const t = Math.max(0, (round.timeLeft || 0) - (now - (net.latestAt || now)) / 1000);
+      const text = round.timeLeft > 0 ? `Волна ${wave + 1} через ${Math.max(1, Math.ceil(t))}`
+        : wave > 0 ? "Волна пройдена" : "Ожидание волны";
+      const y = H * 0.3;
+      ctx.font = "bold 34px sans-serif";
+      const hw = ctx.measureText(text).width / 2 + 8;
+      ctx.globalAlpha = hudAlpha(W / 2 - hw, y - 36, W / 2 + hw, y + 10);
+      ctx.lineWidth = 6;
+      ctx.strokeText(text, W / 2, y);
+      ctx.fillStyle = "#c5e1a5";
+      ctx.fillText(text, W / 2, y);
+    }
+    ctx.restore();
+  }
+
   // ---- Табло по удержанию Tab ----
   // В раунде — счёт игроков, в intermission — таблица лидеров.
   // preventDefault и на keydown, и на keyup: иначе Tab уводит фокус с холста.
@@ -476,13 +595,17 @@ export function createRenderer(canvas, net, on) {
   on(window, "keyup", (e) => { if (e.code === "Tab") { e.preventDefault(); tabHeld = false; } });
   on(window, "blur", () => { tabHeld = false; }); // отпустили Tab вне окна
 
-  function drawScoreOverlay(snap, wel) {
+  // В режиме zombie вместо PvP-счёта — список игроков с убитыми зомби (score) и
+  // отметкой, кто сейчас мёртв (ждёт следующей волны).
+  function drawScoreOverlay(snap, wel, zombie) {
     const rows = (snap.players || []).slice().sort((a, b) => b.score - a.score || a.id - b.id);
     const rowH = 28, w = 300, padTop = 52;
     const h = padTop + rows.length * rowH + 16;
     const x0 = (W - w) / 2, y0 = Math.max(40, (H - h) / 2);
 
-    ctx.fillStyle = "rgba(10,10,14,0.72)";
+    // Почти непрозрачный: табло открывают и поверх экрана смерти, его крупный текст
+    // при 0.72 просвечивал сквозь строки.
+    ctx.fillStyle = "rgba(10,10,14,0.92)";
     ctx.fillRect(x0, y0, w, h);
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
     ctx.lineWidth = 1;
@@ -491,11 +614,11 @@ export function createRenderer(canvas, net, on) {
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
     ctx.font = "bold 16px sans-serif";
-    ctx.fillText("Счёт", x0 + w / 2, y0 + 24);
+    ctx.fillText(zombie ? "Игроки" : "Счёт", x0 + w / 2, y0 + 24);
     ctx.font = "12px monospace";
     ctx.fillStyle = "#888";
     ctx.textAlign = "left";  ctx.fillText("игрок", x0 + 36, y0 + 44);
-    ctx.textAlign = "right"; ctx.fillText("счёт", x0 + w - 14, y0 + 44);
+    ctx.textAlign = "right"; ctx.fillText(zombie ? "убито зомби" : "счёт", x0 + w - 14, y0 + 44);
 
     let y = y0 + padTop;
     for (const p of rows) {
@@ -508,10 +631,15 @@ export function createRenderer(canvas, net, on) {
       ctx.fillStyle = col;
       ctx.beginPath(); ctx.arc(x0 + 20, y + rowH / 2 - 1, 5, 0, Math.PI * 2); ctx.fill();
       ctx.font = isMe ? "bold 15px monospace" : "15px monospace";
-      ctx.textAlign = "left";
-      ctx.fillText(`${playerName(p)}${isMe ? " (вы)" : ""}`, x0 + 36, y + 19);
+      ctx.save();
+      if (zombie && p.dead) ctx.globalAlpha = 0.45; // мёртв — ждёт следующей волны
       ctx.textAlign = "right";
       ctx.fillText(String(p.score), x0 + w - 14, y + 19);
+      const scoreW = ctx.measureText(String(p.score)).width;
+      ctx.textAlign = "left";
+      const suffix = `${isMe ? " (вы)" : ""}${zombie && p.dead ? " †" : ""}`;
+      ctx.fillText(fitText(playerName(p), w - 36 - 14 - scoreW - 10 - ctx.measureText(suffix).width) + suffix, x0 + 36, y + 19);
+      ctx.restore();
       y += rowH;
     }
   }
@@ -694,7 +822,9 @@ export function createRenderer(canvas, net, on) {
 
   // Затемнение и крупный отсчёт до респауна. respawnIn приходит раз в тик —
   // между снапшотами досчитываем по времени, чтобы цифра не залипала.
-  function drawDeath(me, now) {
+  // Режим zombie: убитый ждёт следующей волны. Пока волна идёт, таймера нет
+  // (respawnIn 0) — пишем, сколько зомби осталось; между волнами respawnIn — отсчёт до неё.
+  function drawDeath(me, now, round, zombie) {
     ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(0, 0, W, H);
     const left = Math.max(0, (me.respawnIn || 0) - (now - (net.latestAt || now)) / 1000);
@@ -703,12 +833,21 @@ export function createRenderer(canvas, net, on) {
     ctx.fillStyle = "#ff6b6b";
     ctx.font = "bold 26px sans-serif";
     ctx.fillText("Вы убиты", cx, cy - 70);
+    if (zombie && !(me.respawnIn > 0)) {
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 22px sans-serif";
+      ctx.fillText("Вернётесь в начале следующей волны", cx, cy);
+      ctx.fillStyle = "#bbb";
+      ctx.font = "16px sans-serif";
+      ctx.fillText(`Волна ${round.wave || 0} · осталось зомби: ${round.zombiesLeft || 0}`, cx, cy + 32);
+      return;
+    }
     ctx.fillStyle = "#fff";
     ctx.font = "bold 96px sans-serif";
     ctx.fillText(String(Math.max(1, Math.ceil(left))), cx, cy + 30);
     ctx.fillStyle = "#bbb";
     ctx.font = "16px sans-serif";
-    ctx.fillText("респаун", cx, cy + 62);
+    ctx.fillText(zombie ? `до волны ${(round.wave || 0) + 1}` : "респаун", cx, cy + 62);
   }
 
   // Левый верхний угол: игроку — только состояние звука, и то лишь когда он выключен или
@@ -763,12 +902,13 @@ export function createRenderer(canvas, net, on) {
     }
 
     if (snap && wel) {
+      const list = renderPlayers(now, snap);
       drawPickups(snap, now);
+      drawZombies(snap, now, list); // над пикапами, под пулями и игроками
       drawBullets(now);
 
       // Игроки
       const meNow = net.me();
-      const list = renderPlayers(now, snap);
       pruneMotion(list);
       myDrawPos = null;
       for (let p of list) {
@@ -797,15 +937,17 @@ export function createRenderer(canvas, net, on) {
 
     const round = snap && snap.round;
     const me = snap && wel ? net.me() : null;
+    const zombie = net.isZombie(snap);
     if (snap && wel && isPlaying(snap)) {
-      if (round) drawRoundTimer(round); // у старого сервера раундов нет
+      if (zombie) drawWaveHud(round, me, now);
+      else if (round) drawRoundTimer(round); // у старого сервера раундов нет
       if (me && me.dead) {
-        drawDeath(me, now);
+        drawDeath(me, now, round, zombie);
       } else {
         if (me) drawAmmo(me, now);
         drawCrosshair(snap, wel, W / wel.width, H / wel.height);
       }
-      if (tabHeld) drawScoreOverlay(snap, wel); // последним — поверх экрана смерти тоже
+      if (tabHeld) drawScoreOverlay(snap, wel, zombie); // последним — поверх экрана смерти тоже
     } else if (round && wel && round.phase === "intermission") {
       drawIntermission(round, snap, wel);
       if (tabHeld) drawLeaderboardOverlay();
