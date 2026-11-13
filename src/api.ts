@@ -99,6 +99,18 @@ export function roomByCode(code: string): Promise<CreatedRoom & Partial<RoomInfo
   });
 }
 
+/** Строка таблицы лидеров (GET /leaderboard?n=…): очки за всё время. */
+export type LeaderRow = { name: string; score: number };
+
+/** Лучшие игроки за всё время — та же таблица, что в игре между раундами. */
+export async function getLeaderboard(n = 10, signal?: AbortSignal): Promise<LeaderRow[]> {
+  const data = await request<unknown>(`/leaderboard?n=${n}`, { signal }, {});
+  if (!Array.isArray(data)) return [];
+  return data
+    .filter((e): e is { name?: unknown; score: number } => !!e && typeof e.score === "number")
+    .map((e) => ({ name: typeof e.name === "string" && e.name ? e.name : "—", score: e.score }));
+}
+
 /** Ссылка-приглашение в приватную комнату: текущая страница с ?join=<code>. */
 export function inviteLink(code: string): string {
   const u = new URL(location.href);
