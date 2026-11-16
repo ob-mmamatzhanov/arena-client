@@ -1,6 +1,11 @@
 // Эффекты: частицы, вспышка экрана, тряска камеры и синтезированный звук.
 // Ничего не знает о сети: получает снапшоты через fx.onSnapshot и рисует по вызовам из рендера.
 // Один экземпляр на страницу: AudioContext и обработчики звука живут между сессиями.
+import { WEAPONS, weaponKey, pelletOffset } from "./weapons.js";
+
+// Насколько дуло дальше пистолетного (длина ствола в sprites.js makeHeldWeapon минус 12).
+const MUZZLE_EXTRA = { shotgun: 7, smg: 4, rifle: 14 };
+
 export const fx = (function () {
   // ---------------- Частицы ----------------
   // Каждая частица: {x, y, vx, vy, life, color}; life — оставшиеся секунды.
@@ -51,9 +56,11 @@ export const fx = (function () {
     }
   }
 
-  function drawParticles(ctx, now) {
+  // view — видимая область мира {x0, y0, x1, y1} (уже с запасом); за ней частицы не рисуем.
+  function drawParticles(ctx, now, view) {
     drawRings(ctx, now);
     for (const p of particles) {
+      if (view && (p.x < view.x0 || p.x > view.x1 || p.y < view.y0 || p.y > view.y1)) continue;
       ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
       ctx.fillStyle = p.color;
       ctx.beginPath();
@@ -87,6 +94,7 @@ export const fx = (function () {
   // ---------------- Звук (Web Audio, без файлов) ----------------
   let audio = null, master = null, noiseBuf = null;
   let muted = false;
+  const NOISE_SEC = 0.5;
 
   // Браузер не даёт запустить AudioContext без жеста пользователя — создаём по первому.
   function ensureAudio() {
@@ -97,8 +105,8 @@ export const fx = (function () {
       master = audio.createGain();
       master.gain.value = muted ? 0 : 0.6;
       master.connect(audio.destination);
-      // Белый шум на 60 мс — один буфер на все выстрелы.
-      noiseBuf = audio.createBuffer(1, Math.ceil(audio.sampleRate * 0.06), audio.sampleRate);
+      // Белый шум на 0.5 с — один буфер на все звуки; короткие останавливаются раньше.
+      noiseBuf = audio.createBuffer(1, Math.ceil(audio.sampleRate * NOISE_SEC), audio.sampleRate);
       const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     }
@@ -123,21 +131,63 @@ export const fx = (function () {
 
   const canPlay = () => audio && audio.state === "running" && !muted;
 
-  // Выстрел: шум 60 мс через lowpass 1200 Гц с быстрым спадом громкости.
-  function playShot(volume = 1) {
-    if (!canPlay()) return;
-    const t = audio.currentTime;
+  // Шум через фильтр с экспоненциальным спадом: основа всех выстрелов.
+  // q — добротность (для bandpass); offset — сдвиг по буферу, чтобы наложенные
+  // слои одного выстрела не были одним и тем же шумом.
+  function noise(start, dur, type, freq, peak, q = 1, offset = 0) {
     const src = audio.createBufferSource();
     src.buffer = noiseBuf;
-    const lp = audio.createBiquadFilter();
-    lp.type = "lowpass";
-    lp.frequency.value = 1200;
+    const f = audio.createBiquadFilter();
+    f.type = type;
+    f.frequency.value = freq;
+    f.Q.value = q;
     const g = audio.createGain();
-    g.gain.setValueAtTime(0.5 * volume, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
-    src.connect(lp).connect(g).connect(master);
-    src.start(t);
-    src.stop(t + 0.06);
+    g.gain.setValueAtTime(peak, start);
+    g.gain.exponentialRampToValueAtTime(0.001, start + dur);
+    src.connect(f).connect(g).connect(master);
+    src.start(start, Math.min(offset, NOISE_SEC - dur));
+    src.stop(start + dur);
+  }
+
+  // Выстрел — у каждого оружия свой:
+  //   пистолет — шум 60 мс через lowpass 1200 Гц (как был);
+  //   дробовик — ниже и длиннее: lowpass 650 Гц на 0.3 с и глухой удар 90 → 40 Гц;
+  //   автомат — короче и выше: 35 мс полосы 2.2 кГц, тише (стреляет очередями);
+  //   винтовка — резкий щелчок 10 мс на 4.5 кГц и хвост lowpass 900 Гц на 0.45 с.
+  function playShot(volume = 1, weapon = "pistol") {
+    if (!canPlay()) return;
+    const t = audio.currentTime;
+    switch (weapon) {
+      case "shotgun":
+        noise(t, 0.3, "lowpass", 650, 0.65 * volume);
+        noise(t, 0.05, "lowpass", 1800, 0.35 * volume, 1, 0.2);
+        sweep(90, 40, t, 0.22, 0.55 * volume);
+        break;
+      case "smg":
+        noise(t, 0.035, "bandpass", 2200, 0.55 * volume, 0.9);
+        break;
+      case "rifle":
+        noise(t, 0.01, "bandpass", 4500, 0.9 * volume, 1.5);
+        noise(t, 0.45, "lowpass", 900, 0.3 * volume, 1, 0.05);
+        sweep(220, 70, t, 0.12, 0.25 * volume);
+        break;
+      default:
+        noise(t, 0.06, "lowpass", 1200, 0.5 * volume);
+    }
+  }
+
+  // Синус, съезжающий f0 → f1 за dur: «удар» выстрела и поломки.
+  function sweep(f0, f1, start, dur, peak) {
+    const osc = audio.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(f0, start);
+    osc.frequency.exponentialRampToValueAtTime(f1, start + dur);
+    const g = audio.createGain();
+    g.gain.setValueAtTime(peak, start);
+    g.gain.exponentialRampToValueAtTime(0.001, start + dur);
+    osc.connect(g).connect(master);
+    osc.start(start);
+    osc.stop(start + dur + 0.01);
   }
 
   function tone(freq, start, dur, peak) {
@@ -262,14 +312,24 @@ export const fx = (function () {
       switch (e.type) {
         case "shot": {
           // x, y — центр стрелка; дуло — на краю круга по направлению взгляда.
+          // Частицы: вспышка у дула и по искре на каждую дробину — вдоль её
+          // направления в веере (у дробовика — 6 искр веером, у остальных — одна).
           const p = c.players.get(e.playerId);
           const a = p ? p.angle : 0;
-          const mx = e.x + Math.cos(a) * (c.radius + 3), my = e.y + Math.sin(a) * (c.radius + 3);
-          burst(mx, my, 2 + (Math.random() < 0.5 ? 1 : 0), {
+          const key = weaponKey(e.weapon), w = WEAPONS[key];
+          const reach = c.radius + 3 + (MUZZLE_EXTRA[key] || 0);
+          const mx = e.x + Math.cos(a) * reach, my = e.y + Math.sin(a) * reach;
+          burst(mx, my, 1 + (Math.random() < 0.5 ? 1 : 0), {
             angle: a, spreadAngle: 0.9, speed: [120, 260], life: [0.08, 0.16], size: [1.2, 2],
             colors: ["#fff6c8", "#ffd54a"],
           });
-          playShot(e.playerId === c.myId ? 1 : 0.45);
+          for (let k = 0; k < w.pellets; k++) {
+            burst(mx, my, 1, {
+              angle: a + pelletOffset(w, k, w.pellets), spreadAngle: 0.15,
+              speed: [180, 320], life: [0.1, 0.18], size: [1.2, 2], colors: ["#fff6c8", "#ffd54a"],
+            });
+          }
+          playShot(e.playerId === c.myId ? 1 : 0.45, key);
           break;
         }
         case "bulletHit":

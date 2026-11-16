@@ -150,7 +150,7 @@ const summary = computed(() => {
 <template>
   <div class="game">
     <div class="stage">
-      <canvas ref="canvas" width="800" height="600"></canvas>
+      <canvas ref="canvas"></canvas>
 
       <div v-if="lost !== null" class="overlay">
         <div class="panel">
@@ -210,11 +210,11 @@ const summary = computed(() => {
 </template>
 
 <style scoped>
-/* Холст вписывается в окно: не шире 800 px и с запасом по высоте под панель. Координаты
-   мыши net.js пересчитывает через getBoundingClientRect, так что CSS-масштаб безопасен. */
-.game { width: min(800px, calc(100vw - 32px), calc((100vh - 96px) * 4 / 3)); min-width: 320px; margin-top: 16px; }
-.stage { position: relative; }
-canvas { display: block; width: 100%; height: auto; background: #1e1e24; cursor: none; } /* прицел рисуем сами */
+/* Игра на всё окно: холст занимает всё, кроме панели снизу. Размер буфера и масштаб
+   render.js берёт из CSS-размера холста; мышь net.js считает в долях его прямоугольника. */
+.game { position: fixed; inset: 0; display: flex; flex-direction: column; background: #1e1e24; }
+.stage { position: relative; flex: 1; min-height: 0; }
+canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: none; } /* прицел рисуем сами */
 .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
            background: rgba(10, 10, 14, 0.78); cursor: default; }
 .panel { min-width: 280px; max-width: 90%; box-sizing: border-box; padding: 24px; background: #1b1b22;
@@ -231,8 +231,8 @@ canvas { display: block; width: 100%; height: auto; background: #1e1e24; cursor:
 .stats b { color: #c5e1a5; font: bold 26px monospace; }
 button:disabled { opacity: 0.5; cursor: default; }
 
-.bar { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 6px 10px;
-       background: #1b1b22; border: 1px solid #333; border-radius: 6px; color: #ccc; font-size: 13px; }
+.bar { flex: none; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 6px 12px;
+       background: #1b1b22; border-top: 1px solid #333; color: #ccc; font-size: 13px; }
 .badge { padding: 2px 8px; border-radius: 10px; background: #343a66; color: #fff; font-size: 12px; }
 .room { display: flex; align-items: center; gap: 6px; }
 .room b { color: #fff; font-family: monospace; font-size: 15px; letter-spacing: 0.15em; }

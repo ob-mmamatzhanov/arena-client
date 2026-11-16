@@ -66,18 +66,10 @@ export function makePlayer(colorIndex, frames = 4) {
     ctx.fillStyle = color;
     ellipse(ctx, cx - 1, cy, 8, 11);
 
-    // руки с оружием вперёд
+    // руки вперёд; само оружие — отдельный слой (makeHeldWeapon), его рисует drawPlayer
     ctx.fillStyle = skin;
     ellipse(ctx, cx + 6, cy - 5, 3, 3);
     ellipse(ctx, cx + 6, cy + 5, 3, 3);
-    // Оружие светлое с тёмной кромкой: #2b2b2b на тёмном полу было не видно,
-    // а по нему читается направление взгляда.
-    ctx.fillStyle = "#111";
-    rounded(ctx, cx + 4.5, cy - 2.5, 12, 5, 1.5);
-    ctx.fillStyle = "#6d7380";
-    rounded(ctx, cx + 5, cy - 2, 11, 4, 1);
-    ctx.fillStyle = "#b8bec8";
-    rounded(ctx, cx + 12, cy - 1, 4, 2, 1);
 
     // голова — тёмная обводка отделяет её от плеч
     ctx.fillStyle = "rgba(40,25,15,0.9)";
@@ -93,6 +85,103 @@ export function makePlayer(colorIndex, frames = 4) {
     out.push(c);
   }
   return out;
+}
+
+// --- Оружие в руках -------------------------------------------------------------
+// Вид сверху, ствол вправо. Слой HELD_W×HELD_H рисуется поверх тела: левый край —
+// в HELD_X от центра игрока, по вертикали — по центру. Длина и толщина ствола у
+// каждого оружия свои, чтобы его было видно издалека. Светлый металл с тёмной
+// кромкой: тёмный ствол на тёмном полу терялся, а по нему читается направление взгляда.
+
+export const HELD_W = 30, HELD_H = 10, HELD_X = 4.5;
+
+export function makeHeldWeapon(type) {
+  const [c, ctx] = canvas(HELD_W, HELD_H);
+  const m = HELD_H / 2; // ось ствола
+  const edge = "#111", metal = "#6d7380", light = "#b8bec8", dark = "#3c4049";
+  // Ствол: кромка, тело, светлый срез дула. len — длина, th — толщина.
+  const barrel = (len, th, tip = 4) => {
+    ctx.fillStyle = edge;
+    rounded(ctx, 0, m - th / 2, len, th, 1.5);
+    ctx.fillStyle = metal;
+    rounded(ctx, 0.5, m - th / 2 + 0.5, len - 1, th - 1, 1);
+    ctx.fillStyle = light;
+    rounded(ctx, len - tip, m - Math.min(1, th / 2 - 1), tip, Math.min(2, th - 2), 0.8);
+  };
+  switch (type) {
+    case "shotgun": // короткий и толстый, два ствола рядом
+      barrel(19, 7, 3);
+      ctx.fillStyle = dark;
+      ctx.fillRect(9, m - 0.4, 9.5, 0.8); // шов между стволами
+      ctx.fillStyle = light;
+      circle(ctx, 18, m - 1.6, 0.9); circle(ctx, 18, m + 1.6, 0.9); // два дула
+      break;
+    case "smg": // средний, с магазином вбок
+      ctx.fillStyle = edge;
+      rounded(ctx, 6, m + 1.5, 3.5, 4.5, 1); // магазин
+      ctx.fillStyle = dark;
+      rounded(ctx, 6.5, m + 2, 2.5, 3.5, 0.8);
+      barrel(16, 5);
+      break;
+    case "rifle": // длинный и тонкий, с прицелом
+      barrel(26, 3.5, 3);
+      ctx.fillStyle = edge;
+      rounded(ctx, 4, m - 2.5, 9, 5, 2);
+      ctx.fillStyle = dark;
+      rounded(ctx, 4.5, m - 2, 8, 4, 1.6);
+      ctx.fillStyle = "#7fd3ff"; // блик линзы
+      ctx.fillRect(11, m - 1, 1, 2);
+      break;
+    default: // пистолет — как был у спрайта игрока
+      barrel(12, 5);
+  }
+  return c;
+}
+
+// --- Пикап оружия ---------------------------------------------------------------
+// 24×12: тёмный силуэт оружия сбоку на светлой подложке — отличается от
+// квадратных пикапов здоровья, патронов и скорости и читается на любом полу.
+
+export const WEAPON_PICKUP_W = 24, WEAPON_PICKUP_H = 12;
+
+export function makeWeaponPickup(type) {
+  const [c, ctx] = canvas(WEAPON_PICKUP_W, WEAPON_PICKUP_H);
+  ctx.fillStyle = "rgba(20,22,28,0.85)";
+  rounded(ctx, 0, 0, WEAPON_PICKUP_W, WEAPON_PICKUP_H, 3);
+  ctx.fillStyle = "#e9ecf1";
+  rounded(ctx, 0.75, 0.75, WEAPON_PICKUP_W - 1.5, WEAPON_PICKUP_H - 1.5, 2.5);
+  ctx.fillStyle = "#22262d";
+  const poly = (pts) => {
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.fill();
+  };
+  switch (type) {
+    case "shotgun":
+      poly([[2, 5.5], [8, 4.5], [8, 7.5], [3.5, 9.5], [2, 9]]); // приклад
+      ctx.fillRect(8, 4, 5, 3.5);                                // ствольная коробка
+      ctx.fillRect(13, 4, 9, 2);                                 // ствол
+      ctx.fillRect(13.5, 6.2, 5.5, 1.8);                         // цевьё-помпа
+      ctx.fillRect(9.5, 7.5, 1.5, 2);                            // спуск
+      break;
+    case "smg":
+      ctx.fillRect(3, 4.5, 4, 1.5); ctx.fillRect(2.5, 4.5, 1.5, 4); // складной приклад
+      ctx.fillRect(7, 3.5, 9, 4);                                    // корпус
+      ctx.fillRect(16, 4.5, 4.5, 1.8);                               // короткий ствол
+      poly([[10, 7.5], [12.5, 7.5], [13, 10.5], [10.5, 10.5]]);      // магазин
+      ctx.fillRect(7.5, 7.5, 1.6, 2.5);                              // рукоять
+      break;
+    case "rifle":
+      poly([[1.5, 5.5], [7, 5], [7, 7.5], [2.5, 9], [1.5, 8.5]]); // приклад
+      ctx.fillRect(7, 5, 6, 2.5);                                  // коробка
+      ctx.fillRect(13, 5.5, 9.5, 1.2);                             // длинный тонкий ствол
+      ctx.fillRect(8, 2.5, 6, 1.8);                                // прицел
+      ctx.fillRect(9.5, 4.2, 1, 1); ctx.fillRect(12, 4.2, 1, 1);   // крепления прицела
+      ctx.fillRect(9, 7.5, 1.5, 2);                                // спуск
+      break;
+  }
+  return c;
 }
 
 // --- Зомби ----------------------------------------------------------------------
@@ -264,6 +353,9 @@ export const PICKUP_GLOW = {
   health: "102,187,106",
   ammo: "79,195,247",
   speed: "255,213,79",
+  w_shotgun: "236,240,246",
+  w_smg: "236,240,246",
+  w_rifle: "236,240,246",
 };
 const PICKUP_GLOW_DEFAULT = "255,255,255";
 const PICKUP_GLOW_ALPHA = 0.45; // в центре; к краю — 0
@@ -346,34 +438,48 @@ export function buildSprites() {
       health: makePickup("health"),
       ammo: makePickup("ammo"),
       speed: makePickup("speed"),
+      w_shotgun: makeWeaponPickup("shotgun"),
+      w_smg: makeWeaponPickup("smg"),
+      w_rifle: makeWeaponPickup("rifle"),
+    },
+    held: {
+      pistol: makeHeldWeapon("pistol"),
+      shotgun: makeHeldWeapon("shotgun"),
+      smg: makeHeldWeapon("smg"),
+      rifle: makeHeldWeapon("rifle"),
     },
   };
 }
 
 // Рисует персонажа с поворотом. frame — индекс кадра ходьбы.
 // scale — только визуал: спрайт PLAYER_SIZE·scale, центр и поворот те же.
-export const PLAYER_SCALE = 1.0; // мир 800×600 рисуется 1:1 — спрайт 32 px при хитбоксе 24
+// weapon — слой оружия в руках (sprites.held[...]), поверх тела; null — без оружия (зомби).
+export const PLAYER_SCALE = 1.0; // мир рисуется 1:1 — спрайт 32 px при хитбоксе 24
 
-export function drawPlayer(ctx, frames, x, y, angle, frame = 0, scale = PLAYER_SCALE) {
+export function drawPlayer(ctx, frames, x, y, angle, frame = 0, scale = PLAYER_SCALE, weapon = null) {
   const img = frames[frame % frames.length];
   const size = PLAYER_SIZE * scale;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
   ctx.drawImage(img, -size / 2, -size / 2, size, size);
+  if (weapon) ctx.drawImage(weapon, HELD_X * scale, -HELD_H * scale / 2, HELD_W * scale, HELD_H * scale);
   ctx.restore();
 }
 
-// Пикап: текстура PICKUP_SIZE, на экран — PICKUP_SIZE·scale; свечение радиусом 12·scale.
+// Пикап: текстура PICKUP_SIZE (оружие — WEAPON_PICKUP_W×H), на экран — ×scale;
+// свечение радиусом 12·scale (у оружия — по полуширине).
 // timeMs задаёт фазу покачивания — сдвигайте её по id, чтобы пикапы не качались синхронно.
 export const PICKUP_SCALE = 1.5;
+export const WEAPON_PICKUP_SCALE = 1.2;
 
 export function drawPickup(ctx, sprites, type, x, y, timeMs, scale = PICKUP_SCALE) {
+  const img = sprites.pickups[type];
   const bob = Math.sin(timeMs / 300) * 2 * scale;
-  const size = PICKUP_SIZE * scale;
-  // Свечение — радиальный градиент от центра пикапа (α 0.45) к краю (α 0), радиус 12·scale.
+  const w = (img.width / SCALE) * scale, h = (img.height / SCALE) * scale;
+  // Свечение — радиальный градиент от центра пикапа (α 0.45) к краю (α 0).
   const rgb = PICKUP_GLOW[type] || PICKUP_GLOW_DEFAULT;
-  const r = 12 * scale;
+  const r = Math.max(12 * scale, w / 2 + 6);
   const g = ctx.createRadialGradient(x, y, 0, x, y, r);
   g.addColorStop(0, `rgba(${rgb},${PICKUP_GLOW_ALPHA})`);
   g.addColorStop(1, `rgba(${rgb},0)`);
@@ -382,7 +488,7 @@ export function drawPickup(ctx, sprites, type, x, y, timeMs, scale = PICKUP_SCAL
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
   // Спрайт — поверх градиента.
-  ctx.drawImage(sprites.pickups[type], x - size / 2, y - size / 2 + bob, size, size);
+  ctx.drawImage(img, x - w / 2, y - h / 2 + bob, w, h);
 }
 
 // --- Утилиты ---------------------------------------------------------------------
