@@ -1,8 +1,10 @@
 // Отрисовка мира, HUD и межраундового экрана на <canvas>. Перенесено из inline-скрипта index.html.
 // Состояние рендера (следы пуль, анимации ходьбы, «+1») живёт в замыкании одной сессии.
 import { buildSprites, drawPlayer, drawPickup, drawWall, PALETTE,
-  PLAYER_SIZE, PLAYER_SCALE, PICKUP_SCALE, BULLET_SIZE, CRATE_TILE } from "./sprites.js";
+  PLAYER_SIZE, PLAYER_SCALE, PICKUP_SCALE, WEAPON_PICKUP_SCALE, BULLET_SIZE, CRATE_TILE,
+  WEAPON_PICKUP_W, WEAPON_PICKUP_H } from "./sprites.js";
 import { fx } from "./fx.js";
+import { weaponKey, weaponInfo, pickupWeapon, RIFLE_BULLET_MIN_SPEED } from "./weapons.js";
 
 // net — объект сессии из net.js; on(target, type, fn) — addEventListener с отпиской при закрытии.
 // Возвращает функцию кадра draw(now); цикл requestAnimationFrame крутит net.js.
@@ -13,22 +15,65 @@ export function createRenderer(canvas, net, on) {
   const P_HALF = PLAYER_SIZE * PS / 2;
 
   const ctx = canvas.getContext("2d");
-  let worldSx = 1, worldSy = 1; // масштаб мир → холст (логические px), обновляется в draw
 
-  // ---- Логический размер и HiDPI ----
-  // Вся раскладка — в логических px холста W×H (атрибуты width/height из разметки).
-  // Буфер — W·dpr × H·dpr, базовое преобразование scale(dpr): на retina спрайты и текст
-  // чёткие, а CSS-размер холста (вписывание в окно) от буфера не зависит.
-  const W = canvas.width, H = canvas.height;
-  let dpr = 0;
+  // ---- Размер холста, масштаб и HiDPI ----
+  // Холст растянут CSS на всё окно. Вся раскладка (мир и HUD) — в логических px W×H.
+  // Масштаб zoom держит видимую площадь мира равной эталону VIEW_W×VIEW_H при любых
+  // пропорциях окна: обзор у всех одинаковый по площади (честно в PvP), а на узком
+  // или очень широком окне спрайты не мельчают, как при вписывании эталона целиком.
+  // Буфер — css·dpr, базовое преобразование scale(dpr·zoom): на retina всё чёткое.
+  const VIEW_W = 800, VIEW_H = 600;
+  let W = VIEW_W, H = VIEW_H, zoom = 1, dpr = 0, cssW = 0, cssH = 0;
   function fitBackingStore() {
     const d = Math.min(window.devicePixelRatio || 1, 2); // выше 2 — лишняя нагрузка без видимой разницы
-    if (d === dpr) return;
-    dpr = d;
-    canvas.width = Math.round(W * d);
-    canvas.height = Math.round(H * d);
+    const cw = canvas.clientWidth || VIEW_W, ch = canvas.clientHeight || VIEW_H;
+    if (d === dpr && cw === cssW && ch === cssH) return;
+    dpr = d; cssW = cw; cssH = ch;
+    zoom = Math.sqrt((cw * ch) / (VIEW_W * VIEW_H));
+    W = cw / zoom; H = ch / zoom;
+    canvas.width = Math.round(cw * d);
+    canvas.height = Math.round(ch * d);
   }
-  const resetTransform = () => ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const resetTransform = () => ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+
+  // ---- Камера ----
+  // Мир рисуется 1:1 (1 ед. мира = 1 логический px) и может быть больше холста.
+  // cam — левый верхний угол видимой области в мире. Камера плавно идёт за своим
+  // игроком и не выходит за края мира; если мир по оси меньше холста — он по центру.
+  // Мировые объекты рисуются со смещением −cam (плюс тряска), HUD — без него.
+  const CAM_LERP = 0.15;   // доля пути до цели за кадр при 60 кадр/с
+  const CULL_MARGIN = 50;  // запас вокруг экрана: объект за ним не рисуем
+  const cam = { x: 0, y: 0, wel: null };
+  const view = { x0: 0, y0: 0, x1: W, y1: H }; // видимая область мира с запасом CULL_MARGIN
+
+  const clampCam = (v, world, size) => (world <= size ? (world - size) / 2 : Math.max(0, Math.min(world - size, v)));
+
+  function cameraFocus(wel) {
+    if (net.predictionReady()) return net.renderPos();
+    const me = net.me();
+    return me ? { x: me.x, y: me.y } : { x: wel.width / 2, y: wel.height / 2 };
+  }
+
+  function updateCamera(wel, dt) {
+    const f = cameraFocus(wel);
+    const tx = clampCam(f.x - W / 2, wel.width, W), ty = clampCam(f.y - H / 2, wel.height, H);
+    if (cam.wel !== wel) { // новая сессия (вход, реконнект) — сразу на месте, без проезда
+      cam.wel = wel; cam.x = tx; cam.y = ty;
+    } else {
+      const k = 1 - Math.pow(1 - CAM_LERP, dt * 60); // не зависит от частоты кадров
+      cam.x += (tx - cam.x) * k;
+      cam.y += (ty - cam.y) * k;
+    }
+    view.x0 = cam.x - CULL_MARGIN; view.y0 = cam.y - CULL_MARGIN;
+    view.x1 = cam.x + W + CULL_MARGIN; view.y1 = cam.y + H + CULL_MARGIN;
+  }
+
+  // Доли холста → мир (курсор, см. net.mouse). Без тряски: прицел не дрожит.
+  net.viewToWorld = (u, v) => ({ x: cam.x + u * W, y: cam.y + v * H });
+
+  // Попадает ли круг (x, y, r) / прямоугольник в видимую область с запасом.
+  const inView = (x, y, r = 0) => x + r > view.x0 && x - r < view.x1 && y + r > view.y0 && y - r < view.y1;
+  const rectInView = (x, y, w, h) => x + w > view.x0 && x < view.x1 && y + h > view.y0 && y < view.y1;
 
   // ---- Отладочная строка: F3 или ?debug в адресе ----
   let debug = new URLSearchParams(location.search).has("debug");
@@ -38,9 +83,11 @@ export function createRenderer(canvas, net, on) {
 
   // ---- Пули: след из последних позиций ----
   const TRAIL_POINTS = 4;    // сколько последних позиций из снапшотов хранить на пулю
+  const RIFLE_TRAIL_POINTS = 7; // у винтовки след длиннее (и сама пуля вдвое быстрее)
   const FLASH_MS = 150;      // белая вспышка игрока при попадании
 
-  const bullets = new Map(); // bullet.id -> {hist: [{x, y}] (до 4, старые первыми), vx, vy, owner}
+  // bullet.id -> {hist: [{x, y}] (старые первыми), vx, vy, owner, rifle}
+  const bullets = new Map();
   const flashAt = new Map(); // playerId -> время последнего попадания
 
   net.onSnapshot = (snap, now) => {
@@ -48,8 +95,10 @@ export function createRenderer(canvas, net, on) {
     for (const b of snap.bullets || []) {
       seen.add(b.id);
       const v = bullets.get(b.id) || { hist: [] };
+      // Из чего выпущена, в снапшоте нет — винтовку узнаём по скорости пули.
+      v.rifle = Math.hypot(b.vx, b.vy) > RIFLE_BULLET_MIN_SPEED;
       v.hist.push({ x: b.x, y: b.y });
-      if (v.hist.length > TRAIL_POINTS) v.hist.shift();
+      while (v.hist.length > (v.rifle ? RIFLE_TRAIL_POINTS : TRAIL_POINTS)) v.hist.shift();
       Object.assign(v, { vx: b.vx, vy: b.vy, owner: b.owner });
       bullets.set(b.id, v);
     }
@@ -71,11 +120,12 @@ export function createRenderer(canvas, net, on) {
   };
 
   // Нажатие огня при пустом магазине — сухой щелчок. Сервер в этом случае
-  // просто не стреляет, события shot не будет.
+  // просто не стреляет, события shot не будет. Пусто бывает только у пистолета:
+  // подобранное оружие на последнем патроне сервер сам меняет на пистолет.
   const isPlaying = (snap) => !snap.round || snap.round.phase === "play";
   net.onFireAttempt = () => {
     const me = net.me();
-    if (me && !me.dead && me.ammo === 0 && isPlaying(net.latest)) fx.playDryClick();
+    if (me && !me.dead && weaponKey(me.weapon) === "pistol" && me.ammo === 0 && isPlaying(net.latest)) fx.playDryClick();
   };
 
   function bulletColor(owner, alpha) {
@@ -93,6 +143,9 @@ export function createRenderer(canvas, net, on) {
     for (const v of bullets.values()) {
       const last = v.hist[v.hist.length - 1];
       const hx = last.x + v.vx * ahead, hy = last.y + v.vy * ahead;
+      // Отсечение по отрезку «хвост — голова»: след может заходить в кадр раньше головы.
+      const t0 = v.hist[0];
+      if (!rectInView(Math.min(t0.x, hx), Math.min(t0.y, hy), Math.abs(hx - t0.x), Math.abs(hy - t0.y))) continue;
       if (v.hist.length > 1) {
         ctx.beginPath();
         ctx.moveTo(v.hist[0].x, v.hist[0].y);
@@ -115,8 +168,9 @@ export function createRenderer(canvas, net, on) {
   function drawPickups(snap, now) {
     for (const pk of snap.pickups || []) {
       // Сдвиг фазы по id, чтобы соседние пикапы не качались синхронно.
-      if (!S.pickups[pk.type]) continue;
-      upright(pk.x, pk.y, 0, () => drawPickup(ctx, S, pk.type, 0, 0, now + pk.id * 137, PICKUP_SCALE));
+      if (!S.pickups[pk.type] || !inView(pk.x, pk.y, 24)) continue;
+      const scale = pickupWeapon(pk.type) ? WEAPON_PICKUP_SCALE : PICKUP_SCALE;
+      upright(pk.x, pk.y, 0, () => drawPickup(ctx, S, pk.type, 0, 0, now + pk.id * 137, scale));
     }
   }
 
@@ -245,11 +299,13 @@ export function createRenderer(canvas, net, on) {
 
   function drawZombies(snap, now, players) {
     const list = renderZombies(now, snap);
+    drawnZombies = list; // для мини-карты: кто под ней
     const ids = new Set(list.map(z => z.id));
     for (const id of zombieView.keys()) if (!ids.has(id)) zombieView.delete(id);
     const frame = Math.floor(now / 250) % 2; // шарканье
     for (const z of list) {
-      const v = zombieState(z, now, players);
+      const v = zombieState(z, now, players); // и за экраном: курс копится по движению
+      if (!inView(z.x, z.y, Z_HALF)) continue;
       upright(z.x, z.y, v.angle, (a) => {
         drawPlayer(ctx, S.zombie, 0, 0, a, frame, ZOMBIE_SCALE);
         if (z.hp < ZOMBIE_HP_FULL) drawZombieHp(z.hp, Math.max(v.maxHp, ZOMBIE_HP_FULL));
@@ -272,6 +328,7 @@ export function createRenderer(canvas, net, on) {
   // Сломанный ящик (hp 0, см. net.js applyCrates) не рисуется; у повреждённого — трещины.
   function drawObstacles(wel) {
     wel.obstacles.forEach((o, i) => {
+      if (!rectInView(o.x, o.y, o.w, o.h)) return;
       if (o.kind !== "crate") drawWall(ctx, S.wall, o.x, o.y, o.w, o.h);
       else if (net.solid(o)) drawCrate(o, i, wel.crateHits);
     });
@@ -346,19 +403,35 @@ export function createRenderer(canvas, net, on) {
   }
 
   // ---- Пол ----
-  // Заливаем весь холст в экранных координатах (только сдвиг тряски): тайлы остаются
-  // квадратными. Тот же приём, что в drawWall: тайл нарисован в 2×, сжимаем scale(1/2).
+  // Рисуется в мировых координатах — плитка привязана к миру и едет вместе с камерой.
+  // Заливаем видимую область (с запасом под тряску). Тот же приём, что в drawWall:
+  // тайл нарисован в 2×, сжимаем scale(1/2).
   const SPRITE_SCALE = S.floor.width / 32; // тайл пола — 32 логических px
   const SHAKE_MARGIN = 8;                  // запас под сдвиг тряски
   let floorPattern = null;
-  function drawFloor() {
+  function drawFloor(x, y) {
     floorPattern = floorPattern || ctx.createPattern(S.floor, "repeat");
     ctx.save();
     ctx.scale(1 / SPRITE_SCALE, 1 / SPRITE_SCALE);
     ctx.fillStyle = floorPattern;
-    ctx.fillRect(-SHAKE_MARGIN * SPRITE_SCALE, -SHAKE_MARGIN * SPRITE_SCALE,
+    ctx.fillRect((x - SHAKE_MARGIN) * SPRITE_SCALE, (y - SHAKE_MARGIN) * SPRITE_SCALE,
       (W + 2 * SHAKE_MARGIN) * SPRITE_SCALE, (H + 2 * SHAKE_MARGIN) * SPRITE_SCALE);
     ctx.restore();
+  }
+
+  // Если вид шире или выше мира (маленькая карта на широком окне), за краем мира —
+  // затемнение и граница: иначе пол продолжается и край арены не виден.
+  function drawOutside(wel, x, y) {
+    if (wel.width >= W && wel.height >= H) return;
+    const m = SHAKE_MARGIN, x0 = x - m, y0 = y - m, x1 = x + W + m, y1 = y + H + m;
+    ctx.fillStyle = "rgba(8,9,12,0.78)";
+    if (y0 < 0) ctx.fillRect(x0, y0, x1 - x0, -y0);                                  // сверху
+    if (y1 > wel.height) ctx.fillRect(x0, wel.height, x1 - x0, y1 - wel.height);     // снизу
+    if (x0 < 0) ctx.fillRect(x0, 0, -x0, wel.height);                                // слева
+    if (x1 > wel.width) ctx.fillRect(wel.width, 0, x1 - wel.width, wel.height);      // справа
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-1, -1, wel.width + 2, wel.height + 2);
   }
 
   // ---- Движение по кадрам: ходьба и след рывка ----
@@ -378,7 +451,7 @@ export function createRenderer(canvas, net, on) {
     const m = ctx.getTransform();
     const dx = p.x - s.x, dy = p.y - s.y;
     const d = Math.hypot(dx, dy), dt = (now - s.t) / 1000;
-    if (Math.hypot(dx * m.a, dy * m.d) > WALK_MIN_PX * dpr) s.movedAt = now; // m — в пикселях буфера
+    if (Math.hypot(dx * m.a, dy * m.d) > WALK_MIN_PX * dpr * zoom) s.movedAt = now; // m — в пикселях буфера
     if (dt > 0 && d < TELEPORT_DIST && d / dt > DASH_MIN_SPEED) s.dashAt = now;
     if (d >= TELEPORT_DIST) s.hist = [];
     s.x = p.x; s.y = p.y; s.t = now;
@@ -406,11 +479,11 @@ export function createRenderer(canvas, net, on) {
     for (const id of motion.keys()) if (!ids.has(id)) motion.delete(id);
   }
 
-  // Мир растянут неравномерно (1000×1000 → 800×600): повёрнутый спрайт в таком
-  // преобразовании скашивается. Поэтому спрайты рисуем в экранных координатах
-  // с равномерным масштабом k, а угол переводим в экранный — ствол смотрит на курсор.
+  // Спрайт в точке мира (x, y): система с центром в ней и масштабом k (сейчас мир 1:1,
+  // k = dpr·zoom). Остался от растянутого мира, где повёрнутый спрайт иначе скашивался;
+  // угол переводится в экранный — при равномерном масштабе он не меняется.
   function upright(x, y, angle, fn) {
-    const m = ctx.getTransform(); // текущий мировой: тряска + масштаб, без поворота
+    const m = ctx.getTransform(); // текущий мировой: dpr·zoom + камера + тряска, без поворота
     const k = Math.sqrt(m.a * m.d);
     ctx.save();
     ctx.setTransform(k, 0, 0, k, m.a * x + m.e, m.d * y + m.f);
@@ -446,15 +519,15 @@ export function createRenderer(canvas, net, on) {
   function drawPlayerSprite(p, s, angle, now, mine) {
     const frames = S.players[playerColor(p)];
     const frame = walkFrame(s, now);
+    const gun = S.held[weaponKey(p.weapon)]; // оружие в руках — по p.weapon
 
     if (now - s.dashAt < DASH_TRAIL_MS) { // рывок — две полупрозрачные копии позади
-      const m = ctx.getTransform(); // upright: масштаб k, центр игрока
       [[60, 0.15], [30, 0.3]].forEach(([ago, alpha]) => {
         const q = pastPos(s, now, ago);
         ctx.save();
         ctx.globalAlpha = alpha;
-        // смещение в мировых ед. → экранные px → ед. upright
-        drawPlayer(ctx, frames, (q.x - p.x) * worldSx * dpr / m.a, (q.y - p.y) * worldSy * dpr / m.d, angle, frame, PS);
+        // мир 1:1 — смещение в ед. мира и есть смещение в ед. upright
+        drawPlayer(ctx, frames, q.x - p.x, q.y - p.y, angle, frame, PS, gun);
         ctx.restore();
       });
     }
@@ -476,7 +549,7 @@ export function createRenderer(canvas, net, on) {
 
     ctx.save();
     if (p.invuln) ctx.globalAlpha = Math.floor(now / 110) % 2 ? 0.35 : 0.9; // неуязвим — мигание
-    drawPlayer(ctx, frames, 0, 0, angle, frame, PS);
+    drawPlayer(ctx, frames, 0, 0, angle, frame, PS, gun);
     ctx.restore();
 
     if (now - (flashAt.get(p.id) ?? -Infinity) < FLASH_MS) { // попадание — белая вспышка
@@ -502,17 +575,17 @@ export function createRenderer(canvas, net, on) {
   const MAX_SPREAD = 0.25;
   const CROSS_MIN_PX = 6;
 
-  function drawCrosshair(snap, wel, sx, sy) {
-    const m = net.mouse();
+  function drawCrosshair(snap, wel) {
+    const m = net.mouse(), mv = net.mouseView();
     if (!m || !net.predictionReady()) return;
     const me = (snap.players || []).find(p => p.id === wel.playerId);
     const heat = me && typeof me.heat === "number" ? Math.min(Math.max(me.heat, 0), 1) : 0;
     const from = net.renderPos();
-    const d = Math.hypot(m.x - from.x, m.y - from.y);
-    const rPx = Math.max(CROSS_MIN_PX, d * Math.tan(heat * MAX_SPREAD) * (sx + sy) / 2);
+    const d = Math.hypot(m.x - from.x, m.y - from.y); // мир 1:1 — это и экранные px
+    const rPx = Math.max(CROSS_MIN_PX, d * Math.tan(heat * MAX_SPREAD));
 
-    // Рисуем в экранных координатах: мир растянут неравномерно, и круг стал бы эллипсом.
-    const cx = m.x * sx, cy = m.y * sy;
+    // Прицел — HUD: в экранных координатах, ровно под курсором, без тряски.
+    const cx = mv.u * W, cy = mv.v * H;
     const g = Math.round(255 - 140 * heat), b = Math.round(255 - 215 * heat);
     ctx.strokeStyle = `rgb(255,${g},${b})`; // от белого к оранжево-красному по мере перегрева
     ctx.lineWidth = 1.5;
@@ -537,7 +610,7 @@ export function createRenderer(canvas, net, on) {
   const HUD_FADE = 0.3;
   function hudAlpha(x0, y0, x1, y1) {
     if (!myDrawPos || !net.welcome) return 1;
-    const px = myDrawPos.x * worldSx, py = myDrawPos.y * worldSy, r = P_HALF + 6; // + имя/hp-полоска
+    const px = myDrawPos.x - cam.x, py = myDrawPos.y - cam.y, r = P_HALF + 6; // + имя/hp-полоска
     return px + r > x0 && px - r < x1 && py + r > y0 && py - r < y1 ? HUD_FADE : 1;
   }
 
@@ -791,32 +864,122 @@ export function createRenderer(canvas, net, on) {
     drawLeaderboardTable(x0, y0 + 64, w);
   }
 
-  // ---- Патроны и смерть ----
-  // Счётчик в правом нижнем углу; на нуле мигает красным.
+  // ---- Оружие, патроны и смерть ----
+  // По центру нижнего края: [значок] «Дробовик 8». У подобранного оружия — его
+  // weaponAmmo, у пистолета — общие патроны ammo; пустой пистолет мигает красным.
   function drawAmmo(me, now) {
     if (typeof me.ammo !== "number") return; // старый сервер без патронов
-    const empty = me.ammo === 0;
+    const key = weaponKey(me.weapon);
+    const pistol = key === "pistol";
+    const count = pistol ? me.ammo : me.weaponAmmo || 0;
+    const empty = pistol && count === 0;
+    const label = weaponInfo(key).label;
+    const icon = pistol ? null : S.pickups["w_" + key];
+    const iconW = icon ? WEAPON_PICKUP_W * 1.25 : 0, iconH = WEAPON_PICKUP_H * 1.25;
     const y = H - 14;
-    const num = String(me.ammo);
+    const num = String(count);
     ctx.save();
     ctx.font = "bold 22px monospace";
     const wNum = ctx.measureText(num).width;
-    ctx.font = "12px sans-serif";
-    const wLabel = ctx.measureText("патроны").width;
-    // «патроны 12» одной строкой по центру нижнего края.
-    const x0 = W / 2 - (wLabel + 8 + wNum) / 2;
-    ctx.globalAlpha = hudAlpha(x0 - 6, H - 36, x0 + wLabel + 8 + wNum + 6, H);
+    ctx.font = "bold 13px sans-serif";
+    const wLabel = ctx.measureText(label).width;
+    const gap = 8, total = (icon ? iconW + gap : 0) + wLabel + gap + wNum;
+    const x0 = W / 2 - total / 2;
+    ctx.globalAlpha = hudAlpha(x0 - 6, H - 36, x0 + total + 6, H);
+    if (icon) ctx.drawImage(icon, x0, y - 4 - iconH / 2 - 3, iconW, iconH);
+    const xl = x0 + (icon ? iconW + gap : 0);
     ctx.textAlign = "left";
     ctx.lineWidth = 4;
     ctx.strokeStyle = "rgba(0,0,0,0.55)";
     const color = !empty ? "#e8e8e8" : Math.floor(now / 250) % 2 ? "#ff3b3b" : "#5a1d1d";
-    ctx.strokeText("патроны", x0, y - 2);
-    ctx.fillStyle = empty ? color : "#aaa";
-    ctx.fillText("патроны", x0, y - 2);
+    ctx.strokeText(label, xl, y - 2);
+    ctx.fillStyle = empty ? color : pistol ? "#aaa" : "#ffe9a8"; // подобранное — подсвечено
+    ctx.fillText(label, xl, y - 2);
     ctx.font = "bold 22px monospace";
-    ctx.strokeText(num, x0 + wLabel + 8, y);
+    ctx.strokeText(num, xl + wLabel + gap, y);
     ctx.fillStyle = color;
-    ctx.fillText(num, x0 + wLabel + 8, y);
+    ctx.fillText(num, xl + wLabel + gap, y);
+    ctx.restore();
+  }
+
+  // ---- Мини-карта ----
+  // 160×120 в правом нижнем углу, мир вписан с сохранением пропорций. На ней:
+  // препятствия (кроме сломанных ящиков), пикапы оружия, рамка видимой области
+  // (если мир больше холста), все остальные живые игроки — в арене соперники,
+  // в режиме zombie союзники (в цвете игрока), и свой игрок поверх всего.
+  // Мини-карта закрывает угол мира: если под ней кто-то есть (любой игрок или
+  // зомби), она бледнеет, как HUD над своим игроком, — его видно сквозь неё.
+  const MM_W = 160, MM_H = 120, MM_PAD = 10;
+  let drawnZombies = []; // зомби с позициями, как нарисованы в этом кадре
+  function underRect(x0, y0, x1, y1, players) {
+    const hit = (x, y, r) => {
+      const sx = x - cam.x, sy = y - cam.y;
+      return sx + r > x0 && sx - r < x1 && sy + r > y0 && sy - r < y1;
+    };
+    return players.some(p => !p.dead && hit(p.x, p.y, P_HALF + 6)) || drawnZombies.some(z => hit(z.x, z.y, Z_HALF));
+  }
+  function drawMinimap(wel, players, snap) {
+    const s = Math.min(MM_W / wel.width, MM_H / wel.height);
+    const mw = wel.width * s, mh = wel.height * s;
+    const bx = W - MM_PAD - MM_W, by = H - MM_PAD - MM_H;
+    const ox = bx + (MM_W - mw) / 2, oy = by + (MM_H - mh) / 2; // мир по центру рамки
+    const alpha = underRect(bx, by, bx + MM_W, by + MM_H, players) ? HUD_FADE : hudAlpha(bx, by, bx + MM_W, by + MM_H);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(10,12,18,0.72)";
+    ctx.fillRect(bx, by, MM_W, MM_H);
+    ctx.fillStyle = "rgba(42,46,55,0.9)"; // пол мира
+    ctx.fillRect(ox, oy, mw, mh);
+    ctx.beginPath(); // всё дальше — только внутри мира
+    ctx.rect(ox, oy, mw, mh);
+    ctx.clip();
+
+    for (const o of wel.obstacles) {
+      if (!net.solid(o)) continue;
+      ctx.fillStyle = o.kind === "crate" ? "#a0693a" : "#9a5644";
+      ctx.fillRect(ox + o.x * s, oy + o.y * s, Math.max(1, o.w * s), Math.max(1, o.h * s));
+    }
+
+    if (wel.width > W || wel.height > H) { // рамка экрана
+      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(ox + cam.x * s + 0.5, oy + cam.y * s + 0.5, W * s - 1, H * s - 1);
+    }
+
+    for (const pk of snap.pickups || []) {
+      if (!pickupWeapon(pk.type)) continue;
+      const x = ox + pk.x * s, y = oy + pk.y * s;
+      ctx.fillStyle = "rgba(20,22,28,0.9)";
+      ctx.fillRect(x - 3.5, y - 2.5, 7, 5);
+      ctx.fillStyle = "#eef1f6";
+      ctx.fillRect(x - 2.5, y - 1.5, 5, 3);
+    }
+
+    const dot = (x, y, r, fill) => {
+      ctx.beginPath(); ctx.arc(ox + x * s, oy + y * s, r, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0,0,0,0.75)"; ctx.fill();
+      ctx.beginPath(); ctx.arc(ox + x * s, oy + y * s, r - 1, 0, Math.PI * 2);
+      ctx.fillStyle = fill; ctx.fill();
+    };
+    for (const p of players) if (p.id !== wel.playerId && !p.dead) dot(p.x, p.y, 3, paletteColor(p));
+    if (myDrawPos) {
+      const me = players.find(p => p.id === wel.playerId);
+      const a = net.myAngle();
+      const x = ox + myDrawPos.x * s, y = oy + myDrawPos.y * s;
+      ctx.strokeStyle = "#fff"; // куда смотрю
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * 7, y + Math.sin(a) * 7); ctx.stroke();
+      dot(myDrawPos.x, myDrawPos.y, 4, me ? paletteColor(me) : "#fff");
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, MM_W - 1, MM_H - 1);
     ctx.restore();
   }
 
@@ -882,27 +1045,28 @@ export function createRenderer(canvas, net, on) {
     lastFrame = now;
     fx.update(frameDt);
 
-    fitBackingStore(); // dpr меняется при переносе окна на другой монитор и при зуме страницы
+    fitBackingStore(); // размер окна и dpr меняются (ресайз, другой монитор, зум страницы)
     resetTransform();
     ctx.clearRect(0, 0, W, H);
 
     const snap = net.latest;
     const wel = net.welcome;
 
-    // Тряска: сдвиг камеры (в экранных px) — для пола и мира.
+    // Мир: смещение камеры плюс тряска (в экранных px). Сдвиг округляем до
+    // пикселя буфера — иначе плитка пола и стен мерцает при плавном движении.
+    if (wel) updateCamera(wel, frameDt);
     const sh = wel ? fx.shakeOffset(now) : { x: 0, y: 0 };
-    ctx.translate(sh.x, sh.y);
-    drawFloor(); // фон — паттерн на весь холст, до масштаба мира
+    const camX = wel ? cam.x : 0, camY = wel ? cam.y : 0;
+    const px = dpr * zoom; // пикселей буфера на логический px
+    ctx.translate(Math.round((sh.x - camX) * px) / px, Math.round((sh.y - camY) * px) / px);
+    drawFloor(camX, camY); // фон — видимая часть мира
+    if (wel) drawOutside(wel, camX, camY);
 
-    if (wel) {
-      worldSx = W / wel.width;
-      worldSy = H / wel.height;
-      ctx.scale(worldSx, worldSy);
-      drawObstacles(wel); // под пулями и игроками
-    }
+    if (wel) drawObstacles(wel); // под пулями и игроками
 
+    let list = [];
     if (snap && wel) {
-      const list = renderPlayers(now, snap);
+      list = renderPlayers(now, snap);
       drawPickups(snap, now);
       drawZombies(snap, now, list); // над пикапами, под пулями и игроками
       drawBullets(now);
@@ -921,12 +1085,13 @@ export function createRenderer(canvas, net, on) {
           const rp = net.renderPos();
           p = { ...p, x: rp.x, y: rp.y, angle: net.myAngle() };
         }
-        const s = track(p, now);
-        upright(p.x, p.y, p.angle, (a) => drawPlayerSprite(p, s, a, now, mine));
+        const s = track(p, now); // и за экраном: история нужна для ходьбы и следа рывка
         if (mine) myDrawPos = { x: p.x, y: p.y };
+        if (!inView(p.x, p.y, P_HALF + 20)) continue; // + имя над головой
+        upright(p.x, p.y, p.angle, (a) => drawPlayerSprite(p, s, a, now, mine));
       }
 
-      fx.drawWorld(ctx, now); // кольца и частицы поверх спрайтов
+      fx.drawWorld(ctx, now, view); // кольца и частицы поверх спрайтов
       drawPlusOnes(now);      // «+1» — поверх всех игроков и частиц
     }
 
@@ -941,11 +1106,12 @@ export function createRenderer(canvas, net, on) {
     if (snap && wel && isPlaying(snap)) {
       if (zombie) drawWaveHud(round, me, now);
       else if (round) drawRoundTimer(round); // у старого сервера раундов нет
+      drawMinimap(wel, list, snap);
       if (me && me.dead) {
         drawDeath(me, now, round, zombie);
       } else {
         if (me) drawAmmo(me, now);
-        drawCrosshair(snap, wel, W / wel.width, H / wel.height);
+        drawCrosshair(snap, wel);
       }
       if (tabHeld) drawScoreOverlay(snap, wel, zombie); // последним — поверх экрана смерти тоже
     } else if (round && wel && round.phase === "intermission") {

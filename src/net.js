@@ -2,6 +2,7 @@
 // connect(canvas, opts, callbacks) открывает игровую сессию: сокет, ввод, цикл отрисовки.
 // Состояние мира живёт в замыкании сессии, вне реактивности Vue; наружу — только колбэки.
 import { createRenderer } from "./render.js";
+import { WEAPONS, weaponInfo } from "./weapons.js";
 
 // ---- Профиль: имя и постоянный ключ игрока в localStorage ----
 // localStorage может быть недоступен (приватный режим, file://) — тогда
@@ -265,7 +266,7 @@ export function connect(canvas, opts, callbacks = {}) {
       // а не только последний к кадру, чтобы события не терялись.
       if (net.onSnapshot) net.onSnapshot(msg, net.latestAt);
       for (const e of msg.events || []) {
-        if (e.type === "shot" && e.playerId === net.welcome.playerId) onOwnShot(net.latestAt);
+        if (e.type === "shot" && e.playerId === net.welcome.playerId) onOwnShot(net.latestAt, e.weapon);
       }
       const rp = msg.round && msg.round.phase;
       setPhase(rp === "intermission" || rp === "gameover" ? rp : "play");
@@ -353,27 +354,31 @@ export function connect(canvas, opts, callbacks = {}) {
     input.fire = false;
     fireDownAt = Infinity;
   }
-  const mouse = { x: 0, y: 0, has: false };
+  const mouse = { u: 0, v: 0, has: false };
+  // Доли холста → мир; задаёт рендер (там камера). До него — мир вписан в холст.
+  net.viewToWorld = (u, v) => ({ x: u * (net.welcome ? net.welcome.width : 0), y: v * (net.welcome ? net.welcome.height : 0) });
   let seq = 0;
 
   // Клик во время перезарядки (FireCooldown 0.2 с на сервере) сервер отбросил бы молча:
   // такой клик ставим в очередь — fire держится, пока сервер не выстрелит (событие shot)
   // или пока окно не истечёт. Клик вне перезарядки — как раньше, один Input с fire.
-  const FIRE_COOLDOWN_MS = 200; // game.DefaultConfig().FireCooldown
+  // Кулдаун — у оружия, из которого был последний выстрел (weapons.js, зеркало сервера).
   const FIRE_QUEUE_SLACK_MS = 100;
   let lastShotAt = -Infinity;   // когда пришло событие своего выстрела
+  let lastShotCooldown = WEAPONS.pistol.cooldownMs;
   let fireQueuedFrom = Infinity, fireQueuedUntil = 0; // окно очереди [from, until)
-  function onOwnShot(at) {
+  function onOwnShot(at, weapon) {
     lastShotAt = at;
+    lastShotCooldown = weaponInfo(weapon).cooldownMs;
     fireQueuedUntil = 0; // выстрел из очереди состоялся
   }
 
   // Нажатие огня (не удержание) — для «сухого щелчка» при пустом магазине.
   function fireAttempt() {
     const now = performance.now();
-    if (now - lastShotAt < FIRE_COOLDOWN_MS) {
+    if (now - lastShotAt < lastShotCooldown) {
       fireQueuedFrom = now;
-      fireQueuedUntil = lastShotAt + FIRE_COOLDOWN_MS + FIRE_QUEUE_SLACK_MS;
+      fireQueuedUntil = lastShotAt + lastShotCooldown + FIRE_QUEUE_SLACK_MS;
     }
     if (net.onFireAttempt) net.onFireAttempt();
   }
@@ -417,12 +422,12 @@ export function connect(canvas, opts, callbacks = {}) {
   on(window, "blur", releaseKeys);
   on(document, "visibilitychange", () => { if (document.hidden) releaseKeys(); });
 
+  // Курсор храним в долях холста (u, v ∈ [0, 1]): камера движется и без движения
+  // мыши, поэтому в мировые координаты переводим при каждом обращении (net.mouse).
   on(canvas, "mousemove", (e) => {
     const r = canvas.getBoundingClientRect();
-    const w = net.welcome ? net.welcome.width : canvas.width;
-    const h = net.welcome ? net.welcome.height : canvas.height;
-    mouse.x = (e.clientX - r.left) * (w / r.width);
-    mouse.y = (e.clientY - r.top) * (h / r.height);
+    mouse.u = (e.clientX - r.left) / r.width;
+    mouse.v = (e.clientY - r.top) / r.height;
     mouse.has = true;
   });
   on(canvas, "mousedown", (e) => {
@@ -669,10 +674,10 @@ export function connect(canvas, opts, callbacks = {}) {
 
     if (!net.connected || !pred.ready || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-    // Угол — от отображаемой позиции своего игрока к курсору.
+    // Угол — от отображаемой позиции своего игрока к курсору (в мировых координатах).
     if (mouse.has) {
-      const p = net.renderPos();
-      input.angle = Math.atan2(mouse.y - p.y, mouse.x - p.x);
+      const p = net.renderPos(), m = net.mouse();
+      input.angle = Math.atan2(m.y - p.y, m.x - p.x);
     }
 
     const dt = 1 / net.welcome.tickRate;
@@ -705,7 +710,8 @@ export function connect(canvas, opts, callbacks = {}) {
   net.dashCooldown = () => dash.cd;      // секунд до готовности рывка (предсказано)
   net.dashCooldownMax = DASH_COOLDOWN;
   net.lastCorrection = () => lastCorrection;
-  net.mouse = () => (mouse.has ? { x: mouse.x, y: mouse.y } : null); // в координатах мира
+  net.mouse = () => (mouse.has ? net.viewToWorld(mouse.u, mouse.v) : null); // в координатах мира
+  net.mouseView = () => (mouse.has ? { u: mouse.u, v: mouse.v } : null);   // в долях холста
   net.pendingCount = () => pending.length;
 
   // ---- Таблица лидеров: GET /leaderboard?n=10 того же сервера, кэш 10 с ----
